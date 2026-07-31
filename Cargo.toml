@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytemuck = { version = "1.25", features = ["derive"] }
+eframe = { version = "0.35", default-features = false, features = [
+    "default_fonts",
+    "wayland",
+    "wgpu",
+    "x11",
+] }
 glam = "0.33"
 png = "0.18"
 thiserror = "2"

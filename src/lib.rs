@@ -1,7 +1,9 @@
+pub mod app;
 pub mod atlas;
 pub mod brush;
 pub mod camera;
 pub mod model;
+pub mod renderer;
 pub mod skin;
 
 pub use atlas::{AtlasRect, FaceRegion, face_region};
