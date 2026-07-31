@@ -1,6 +1,8 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
-use eframe::egui::{self, Color32, Key, PointerButton, Rect, Sense, Vec2};
+use eframe::egui::{
+    self, Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, Vec2,
+};
 use glam::Vec2 as ModelVec2;
 
 use crate::{
@@ -28,6 +30,33 @@ const PALETTE: [[u8; 4]; 16] = [
     [0, 0, 0, 0],
 ];
 
+const NEW_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
+const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
+const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
+const COMMAND_SHIFT: Modifiers = Modifiers {
+    shift: true,
+    command: true,
+    ..Modifiers::NONE
+};
+const SAVE_AS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(COMMAND_SHIFT, Key::S);
+const UNDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
+const REDO_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(COMMAND_SHIFT, Key::Z);
+const REDO_ALTERNATE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DocumentAction {
+    New(ModelKind),
+    Open,
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfirmationChoice {
+    Save,
+    Discard,
+    Cancel,
+}
+
 pub struct SkinDrawApp {
     document: SkinDocument,
     kind: ModelKind,
@@ -38,6 +67,10 @@ pub struct SkinDrawApp {
     active_stroke: Option<StrokeBuilder>,
     hovered_hit: Option<ModelHit>,
     uploaded_skin: Skin,
+    pending_action: Option<DocumentAction>,
+    error_message: Option<String>,
+    status_message: Option<String>,
+    allow_close: bool,
 }
 
 impl SkinDrawApp {
@@ -48,10 +81,14 @@ impl SkinDrawApp {
             .as_ref()
             .expect("SkinDraw requires the WGPU renderer");
         ModelRenderer::install(render_state, document.skin());
+        Self::from_document(document, ModelKind::Classic)
+    }
+
+    fn from_document(document: SkinDocument, kind: ModelKind) -> Self {
         Self {
             uploaded_skin: document.skin().clone(),
             document,
-            kind: ModelKind::Classic,
+            kind,
             camera: Camera {
                 yaw: -0.45,
                 pitch: 0.18,
@@ -62,6 +99,62 @@ impl SkinDrawApp {
             active_color: [237, 28, 36, 255],
             active_stroke: None,
             hovered_hit: None,
+            pending_action: None,
+            error_message: None,
+            status_message: None,
+            allow_close: false,
+        }
+    }
+
+    fn toolbar(&mut self, root: &mut egui::Ui, ctx: &egui::Context) {
+        let mut requested_action = None;
+        let mut save = false;
+        let mut save_as = false;
+        egui::Panel::top("document_toolbar")
+            .resizable(false)
+            .show(root, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("New Classic").clicked() {
+                        requested_action = Some(DocumentAction::New(ModelKind::Classic));
+                    }
+                    if ui.button("New Slim").clicked() {
+                        requested_action = Some(DocumentAction::New(ModelKind::Slim));
+                    }
+                    ui.separator();
+                    if ui.button("Open…").clicked() {
+                        requested_action = Some(DocumentAction::Open);
+                    }
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Save As…").clicked() {
+                        save_as = true;
+                    }
+                    ui.separator();
+                    let mut name = self
+                        .document
+                        .path()
+                        .and_then(|path| path.file_name())
+                        .map_or_else(
+                            || "Untitled.png".to_owned(),
+                            |name| name.to_string_lossy().into(),
+                        );
+                    if self.document.is_dirty() {
+                        name.push_str(" •");
+                    }
+                    ui.label(name);
+                    if let Some(status) = &self.status_message {
+                        ui.separator();
+                        ui.colored_label(Color32::LIGHT_GREEN, status);
+                    }
+                });
+            });
+        if let Some(action) = requested_action {
+            self.request_action(action, ctx);
+        } else if save_as {
+            self.save_as();
+        } else if save {
+            self.save();
         }
     }
 
@@ -155,6 +248,7 @@ impl SkinDrawApp {
                     {
                         self.finish_stroke();
                         self.document.undo();
+                        self.status_message = None;
                     }
                     if ui
                         .add_enabled(self.document.redo_len() > 0, egui::Button::new("Redo"))
@@ -162,6 +256,7 @@ impl SkinDrawApp {
                     {
                         self.finish_stroke();
                         self.document.redo();
+                        self.status_message = None;
                     }
                 });
 
@@ -212,6 +307,7 @@ impl SkinDrawApp {
             let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
             self.document
                 .paint(stroke, self.kind, hit, self.brush_size, self.active_color);
+            self.status_message = None;
         }
         if primary_released {
             self.finish_stroke();
@@ -256,22 +352,273 @@ impl SkinDrawApp {
             self.document.commit_stroke(stroke);
         }
     }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if consume(ctx, SAVE_AS_SHORTCUT) {
+            self.save_as();
+        } else if consume(ctx, SAVE_SHORTCUT) {
+            self.save();
+        } else if consume(ctx, OPEN_SHORTCUT) {
+            self.request_action(DocumentAction::Open, ctx);
+        } else if consume(ctx, NEW_SHORTCUT) {
+            self.request_action(DocumentAction::New(self.kind), ctx);
+        } else if consume(ctx, UNDO_SHORTCUT) {
+            self.finish_stroke();
+            self.document.undo();
+            self.status_message = None;
+        } else if consume(ctx, REDO_SHORTCUT) || consume(ctx, REDO_ALTERNATE_SHORTCUT) {
+            self.finish_stroke();
+            self.document.redo();
+            self.status_message = None;
+        }
+    }
+
+    fn request_action(&mut self, action: DocumentAction, ctx: &egui::Context) {
+        self.finish_stroke();
+        if self.document.is_dirty() {
+            self.pending_action = Some(action);
+        } else {
+            self.execute_action(action, ctx);
+        }
+    }
+
+    fn execute_action(&mut self, action: DocumentAction, ctx: &egui::Context) {
+        match action {
+            DocumentAction::New(kind) => {
+                self.replace_document(SkinDocument::new(kind), kind);
+                self.status_message = Some(format!("Created a new {kind:?} skin."));
+            }
+            DocumentAction::Open => self.open(),
+            DocumentAction::Quit => {
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn replace_document(&mut self, document: SkinDocument, kind: ModelKind) {
+        self.finish_stroke();
+        self.document = document;
+        self.kind = kind;
+        self.hovered_hit = None;
+        self.status_message = None;
+    }
+
+    fn open(&mut self) {
+        let Some(path) = file_dialog(self.document.path().map(PathBuf::from)).pick_file() else {
+            return;
+        };
+        self.open_path(path);
+    }
+
+    fn open_path(&mut self, path: PathBuf) {
+        match SkinDocument::load_png(&path) {
+            Ok(document) => {
+                self.replace_document(document, self.kind);
+                self.status_message = Some(format!("Opened {}.", display_path(&path)));
+            }
+            Err(error) => {
+                self.error_message =
+                    Some(format!("Could not open {}:\n{error}", display_path(&path)));
+            }
+        }
+    }
+
+    fn save(&mut self) -> bool {
+        self.finish_stroke();
+        if let Some(path) = self.document.path().map(PathBuf::from) {
+            self.save_to(path)
+        } else {
+            self.save_as()
+        }
+    }
+
+    fn save_as(&mut self) -> bool {
+        self.finish_stroke();
+        let current = self.document.path().map(PathBuf::from);
+        let mut dialog = file_dialog(current.clone());
+        dialog = dialog.set_file_name(
+            current
+                .as_deref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("skin.png"),
+        );
+        let Some(path) = dialog.save_file() else {
+            return false;
+        };
+        self.save_to(ensure_png_extension(path))
+    }
+
+    fn save_to(&mut self, path: PathBuf) -> bool {
+        match self.document.save_png(&path) {
+            Ok(()) => {
+                self.status_message = Some(format!("Saved {}.", display_path(&path)));
+                true
+            }
+            Err(error) => {
+                self.error_message =
+                    Some(format!("Could not save {}:\n{error}", display_path(&path)));
+                false
+            }
+        }
+    }
+
+    fn handle_close_request(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|input| input.viewport().close_requested()) || self.allow_close {
+            return;
+        }
+        if self.document.is_dirty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_action = Some(DocumentAction::Quit);
+        }
+    }
+
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if let Some(action) = self.pending_action {
+            let mut choice = None;
+            egui::Window::new("Unsaved changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.label(format!(
+                        "Save changes to {} before continuing?",
+                        self.document
+                            .path()
+                            .and_then(|path| path.file_name())
+                            .map_or_else(
+                                || "Untitled.png".to_owned(),
+                                |name| name.to_string_lossy().into()
+                            )
+                    ));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Save").clicked() {
+                            choice = Some(ConfirmationChoice::Save);
+                        }
+                        if ui.button("Discard").clicked() {
+                            choice = Some(ConfirmationChoice::Discard);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            choice = Some(ConfirmationChoice::Cancel);
+                        }
+                    });
+                });
+            if let Some(choice) = choice {
+                match choice {
+                    ConfirmationChoice::Save if self.save() => {
+                        self.pending_action = None;
+                        self.execute_action(action, ctx);
+                    }
+                    ConfirmationChoice::Discard => {
+                        self.pending_action = None;
+                        self.execute_action(action, ctx);
+                    }
+                    ConfirmationChoice::Cancel => self.pending_action = None,
+                    ConfirmationChoice::Save => {}
+                }
+            }
+        }
+
+        if let Some(message) = self.error_message.clone() {
+            let mut dismiss = false;
+            egui::Window::new("SkinDraw error")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(ctx, |ui| {
+                    ui.colored_label(Color32::LIGHT_RED, message);
+                    ui.add_space(8.0);
+                    dismiss = ui.button("OK").clicked();
+                });
+            if dismiss {
+                self.error_message = None;
+            }
+        }
+    }
 }
 
 impl eframe::App for SkinDrawApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.handle_close_request(&ctx);
+        self.shortcuts(&ctx);
+        self.toolbar(ui, &ctx);
         self.sidebar(ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.model_view(ui, &ctx));
+        self.dialogs(&ctx);
+        let title = self
+            .document
+            .path()
+            .and_then(|path| path.file_name())
+            .map_or_else(
+                || "Untitled.png".to_owned(),
+                |name| name.to_string_lossy().into(),
+            );
+        let dirty = if self.document.is_dirty() { " •" } else { "" };
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
+            "SkinDraw — {title}{dirty}"
+        )));
     }
+}
+
+fn consume(ctx: &egui::Context, shortcut: KeyboardShortcut) -> bool {
+    ctx.input_mut(|input| input.consume_shortcut(&shortcut))
+}
+
+fn file_dialog(current: Option<PathBuf>) -> rfd::FileDialog {
+    let mut dialog = rfd::FileDialog::new().add_filter("Minecraft skin PNG", &["png"]);
+    if let Some(path) = current
+        && let Some(directory) = path.parent()
+    {
+        dialog = dialog.set_directory(directory);
+    }
+    dialog
+}
+
+fn ensure_png_extension(mut path: PathBuf) -> PathBuf {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("png"))
+    {
+        path.set_extension("png");
+    }
+    path
+}
+
+fn display_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Texel;
+    use crate::{BodyPart, Face, Layer, Texel};
+    use tempfile::tempdir;
+
+    fn dirty_app() -> SkinDrawApp {
+        let mut document = SkinDocument::new(ModelKind::Classic);
+        let mut stroke = StrokeBuilder::new();
+        document.paint(
+            &mut stroke,
+            ModelKind::Classic,
+            ModelHit {
+                part: BodyPart::Head,
+                layer: Layer::Base,
+                face: Face::Front,
+                distance: 1.0,
+                texel: Texel::new(8, 8),
+            },
+            BrushSize::One,
+            [1, 2, 3, 4],
+        );
+        assert!(document.commit_stroke(stroke));
+        SkinDrawApp::from_document(document, ModelKind::Classic)
+    }
 
     #[test]
     fn presentation_kind_does_not_change_skin_pixels() {
@@ -299,5 +646,113 @@ mod tests {
             [1, 2, 4]
         );
         assert_eq!(Texel::new(1, 2).x, 1);
+    }
+
+    #[test]
+    fn dirty_replacement_is_guarded_and_discard_replaces_atomically() {
+        let mut app = dirty_app();
+        let changed = app.document.skin().clone();
+        let ctx = egui::Context::default();
+        app.request_action(DocumentAction::New(ModelKind::Slim), &ctx);
+        assert_eq!(
+            app.pending_action,
+            Some(DocumentAction::New(ModelKind::Slim))
+        );
+        assert_eq!(app.document.skin(), &changed);
+        assert_eq!(app.kind, ModelKind::Classic);
+
+        app.pending_action = None;
+        app.execute_action(DocumentAction::New(ModelKind::Slim), &ctx);
+        assert_eq!(app.kind, ModelKind::Slim);
+        assert!(!app.document.is_dirty());
+        assert_ne!(app.document.skin(), &changed);
+        assert_eq!(app.document.undo_len(), 0);
+    }
+
+    #[test]
+    fn save_and_reopen_preserve_rgba_and_clean_state() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("saved-skin.png");
+        let mut app = dirty_app();
+        let expected = app.document.skin().clone();
+        assert!(app.save_to(path.clone()));
+        assert!(!app.document.is_dirty());
+        assert_eq!(app.document.path(), Some(path.as_path()));
+        let reopened = SkinDocument::load_png(&path).unwrap();
+        assert_eq!(reopened.skin(), &expected);
+        assert!(!reopened.is_dirty());
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn failed_save_preserves_document_and_surfaces_error() {
+        let directory = tempdir().unwrap();
+        let mut app = dirty_app();
+        let expected = app.document.skin().clone();
+        assert!(!app.save_to(directory.path().to_path_buf()));
+        assert_eq!(app.document.skin(), &expected);
+        assert!(app.document.is_dirty());
+        assert!(app.document.path().is_none());
+        assert!(
+            app.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not save"))
+        );
+    }
+
+    #[test]
+    fn invalid_open_preserves_document_and_surfaces_validation_error() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("invalid.png");
+        std::fs::write(&path, b"not a png").unwrap();
+        let mut app = dirty_app();
+        let expected = app.document.skin().clone();
+        app.open_path(path);
+        assert_eq!(app.document.skin(), &expected);
+        assert!(app.document.is_dirty());
+        assert!(app.document.path().is_none());
+        assert!(
+            app.error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("Could not open"))
+        );
+    }
+
+    #[test]
+    fn file_names_gain_png_only_when_missing_an_extension() {
+        assert_eq!(
+            ensure_png_extension(PathBuf::from("alex")),
+            PathBuf::from("alex.png")
+        );
+        assert_eq!(
+            ensure_png_extension(PathBuf::from("alex.PNG")),
+            PathBuf::from("alex.PNG")
+        );
+        assert_eq!(
+            ensure_png_extension(PathBuf::from("alex.txt")),
+            PathBuf::from("alex.png")
+        );
+    }
+
+    #[test]
+    fn shortcuts_cover_the_desktop_document_commands() {
+        let shortcuts = std::hint::black_box([
+            NEW_SHORTCUT,
+            OPEN_SHORTCUT,
+            SAVE_SHORTCUT,
+            SAVE_AS_SHORTCUT,
+            UNDO_SHORTCUT,
+            REDO_SHORTCUT,
+            REDO_ALTERNATE_SHORTCUT,
+        ]);
+        assert_eq!(
+            shortcuts.map(|shortcut| shortcut.logical_key),
+            [Key::N, Key::O, Key::S, Key::S, Key::Z, Key::Z, Key::Y]
+        );
+        assert!(shortcuts[3].modifiers.shift);
+        assert!(shortcuts[5].modifiers.shift);
+        for shortcut in shortcuts {
+            assert!(shortcut.modifiers.command);
+        }
     }
 }
