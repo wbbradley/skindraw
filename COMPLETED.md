@@ -234,3 +234,34 @@ Add a DAW-style solo mode that exposes otherwise occluded faces of one body part
   behavior, selected-part picking, solid-geometry filtering, faint outline generation, layer
   toggles, and unchanged document state. Manually verify arm and leg interior faces can be painted,
   then run formatting, warnings-denied Clippy, and the full test suite.
+
+## Add full-range tabbed color controls
+
+Replaced the slider-only custom color section with HSV and RGBA/Hex tabs. The HSV tab provides a
+full two-dimensional saturation/value field with hue and blend-alpha controls; the exact tab
+provides byte-valued RGBA fields and validated `#RRGGBBAA` editing. Active color remains
+unmultiplied RGBA8, transparent colors are shown over a checkerboard, and the tools pane now scrolls
+at constrained heights. Added exact hex round-trip, invalid-input, and tab-state tests and visually
+checked the full picker and minimum window layout.
+
+### Original task
+
+## Add full-range tabbed color controls
+
+Replace the current coarse color-editing presentation with compact standard color-picker tabs while
+keeping the active color as exact unmultiplied RGBA8.
+
+- Add color-control tab state in `src/app.rs`: an HSV tab with a two-dimensional
+  saturation/value field plus hue and alpha controls, and an RGBA tab with exact 0–255 channel
+  entry and hexadecimal RGBA input.
+- Use egui's existing color-picker facilities where practical, with `Alpha::OnlyBlend`; do not add
+  a new GUI dependency merely to obtain a picker. Convert edits back to the app's `[u8; 4]`
+  `active_color` without premultiplication or cumulative round-off.
+- Keep transparent colors usable as erasers and show a checkerboard-backed active-color preview so
+  alpha is legible. Preserve the existing quick swatches until the editable-palette task replaces
+  their immutable storage.
+- Adapt the computed tools-pane width and layout for every tab at the minimum supported window
+  size.
+- Test exact RGBA and hexadecimal round trips, alpha preservation, invalid hexadecimal handling,
+  and tab changes that do not alter the active color. Manually verify the picker reaches arbitrary
+  RGB and alpha values, then run formatting, warnings-denied Clippy, and the full test suite.

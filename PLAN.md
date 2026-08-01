@@ -1,25 +1,5 @@
 # Next Up
 
-## Add full-range tabbed color controls
-
-Replace the current coarse color-editing presentation with compact standard color-picker tabs while
-keeping the active color as exact unmultiplied RGBA8.
-
-- Add color-control tab state in `src/app.rs`: an HSV tab with a two-dimensional
-  saturation/value field plus hue and alpha controls, and an RGBA tab with exact 0–255 channel
-  entry and hexadecimal RGBA input.
-- Use egui's existing color-picker facilities where practical, with `Alpha::OnlyBlend`; do not add
-  a new GUI dependency merely to obtain a picker. Convert edits back to the app's `[u8; 4]`
-  `active_color` without premultiplication or cumulative round-off.
-- Keep transparent colors usable as erasers and show a checkerboard-backed active-color preview so
-  alpha is legible. Preserve the existing quick swatches until the editable-palette task replaces
-  their immutable storage.
-- Adapt the computed tools-pane width and layout for every tab at the minimum supported window
-  size.
-- Test exact RGBA and hexadecimal round trips, alpha preservation, invalid hexadecimal handling,
-  and tab changes that do not alter the active color. Manually verify the picker reaches arbitrary
-  RGB and alpha values, then run formatting, warnings-denied Clippy, and the full test suite.
-
 ## Persist an editable quick palette
 
 Turn the 16 fixed quick swatches into user-editable application preferences.

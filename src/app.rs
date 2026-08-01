@@ -69,6 +69,12 @@ enum ViewGesture {
     Solo,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ColorControlTab {
+    Hsv,
+    Rgba,
+}
+
 pub struct SkinDrawApp {
     document: SkinDocument,
     kind: ModelKind,
@@ -76,6 +82,9 @@ pub struct SkinDrawApp {
     visibility: LayerVisibility,
     brush_size: BrushSize,
     active_color: [u8; 4],
+    color_tab: ColorControlTab,
+    hex_color: String,
+    hex_color_invalid: bool,
     active_stroke: Option<StrokeBuilder>,
     hovered_hit: Option<ModelHit>,
     solo_part: Option<BodyPart>,
@@ -110,6 +119,9 @@ impl SkinDrawApp {
             visibility: LayerVisibility::ALL,
             brush_size: BrushSize::One,
             active_color: [237, 28, 36, 255],
+            color_tab: ColorControlTab::Hsv,
+            hex_color: format_hex_color([237, 28, 36, 255]),
+            hex_color_invalid: false,
             active_stroke: None,
             hovered_hit: None,
             solo_part: None,
@@ -187,117 +199,125 @@ impl SkinDrawApp {
             .show_separator_line(false)
             .show(root, |ui| {
                 panel_left = ui.clip_rect().left();
-                ui.heading("SkinDraw");
-                ui.add_space(8.0);
-
-                ui.label("Arm model");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.kind, ModelKind::Classic, "Classic");
-                    ui.selectable_value(&mut self.kind, ModelKind::Slim, "Slim");
-                });
-                ui.add_space(10.0);
-
-                ui.label("Visible geometry");
-                ui.checkbox(&mut self.visibility.base, "Base");
-                ui.checkbox(&mut self.visibility.outer, "Outer");
-                if !self.visibility.base && !self.visibility.outer {
-                    ui.colored_label(Color32::LIGHT_RED, "Enable a layer to paint.");
-                }
-                ui.add_space(10.0);
-
-                ui.label("Brush");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.brush_size, BrushSize::One, "1");
-                    ui.selectable_value(&mut self.brush_size, BrushSize::Two, "2");
-                    ui.selectable_value(&mut self.brush_size, BrushSize::Four, "4");
-                });
-                ui.add_space(10.0);
-
-                ui.label("Palette");
-                egui::Grid::new("palette")
-                    .spacing(Vec2::splat(4.0))
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for (index, &color) in PALETTE.iter().enumerate() {
-                            let fill = Color32::from_rgba_unmultiplied(
-                                color[0], color[1], color[2], color[3],
+                        ui.heading("SkinDraw");
+                        ui.add_space(8.0);
+
+                        ui.label("Arm model");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.kind, ModelKind::Classic, "Classic");
+                            ui.selectable_value(&mut self.kind, ModelKind::Slim, "Slim");
+                        });
+                        ui.add_space(10.0);
+
+                        ui.label("Visible geometry");
+                        ui.checkbox(&mut self.visibility.base, "Base");
+                        ui.checkbox(&mut self.visibility.outer, "Outer");
+                        if !self.visibility.base && !self.visibility.outer {
+                            ui.colored_label(Color32::LIGHT_RED, "Enable a layer to paint.");
+                        }
+                        ui.add_space(10.0);
+
+                        ui.label("Brush");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.brush_size, BrushSize::One, "1");
+                            ui.selectable_value(&mut self.brush_size, BrushSize::Two, "2");
+                            ui.selectable_value(&mut self.brush_size, BrushSize::Four, "4");
+                        });
+                        ui.add_space(10.0);
+
+                        ui.label("Palette");
+                        egui::Grid::new("palette")
+                            .spacing(Vec2::splat(4.0))
+                            .show(ui, |ui| {
+                                for (index, &color) in PALETTE.iter().enumerate() {
+                                    let fill = Color32::from_rgba_unmultiplied(
+                                        color[0], color[1], color[2], color[3],
+                                    );
+                                    let selected = color == self.active_color;
+                                    let button = egui::Button::new("")
+                                        .min_size(Vec2::splat(PALETTE_SWATCH_SIZE))
+                                        .fill(fill)
+                                        .stroke(if selected {
+                                            egui::Stroke::new(2.0, Color32::WHITE)
+                                        } else {
+                                            egui::Stroke::new(1.0, Color32::DARK_GRAY)
+                                        });
+                                    if ui.add(button).clicked() {
+                                        self.set_active_color(color);
+                                    }
+                                    if (index + 1) % PALETTE_COLUMNS == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                        ui.add_space(10.0);
+
+                        ui.label("Color");
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut self.color_tab, ColorControlTab::Hsv, "HSV");
+                            ui.selectable_value(
+                                &mut self.color_tab,
+                                ColorControlTab::Rgba,
+                                "RGBA / Hex",
                             );
-                            let selected = color == self.active_color;
-                            let button = egui::Button::new("")
-                                .min_size(Vec2::splat(PALETTE_SWATCH_SIZE))
-                                .fill(fill)
-                                .stroke(if selected {
-                                    egui::Stroke::new(2.0, Color32::WHITE)
-                                } else {
-                                    egui::Stroke::new(1.0, Color32::DARK_GRAY)
-                                });
-                            if ui.add(button).clicked() {
-                                self.active_color = color;
+                        });
+                        ui.add_space(4.0);
+                        match self.color_tab {
+                            ColorControlTab::Hsv => self.hsv_color_controls(ui),
+                            ColorControlTab::Rgba => self.rgba_color_controls(ui),
+                        }
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.label("Active");
+                            color_swatch(ui, Vec2::new(72.0, 24.0), self.active_color);
+                        });
+
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.document.undo_len() > 0,
+                                    egui::Button::new("Undo"),
+                                )
+                                .clicked()
+                            {
+                                self.finish_stroke();
+                                self.document.undo();
+                                self.status_message = None;
                             }
-                            if (index + 1) % PALETTE_COLUMNS == 0 {
-                                ui.end_row();
+                            if ui
+                                .add_enabled(
+                                    self.document.redo_len() > 0,
+                                    egui::Button::new("Redo"),
+                                )
+                                .clicked()
+                            {
+                                self.finish_stroke();
+                                self.document.redo();
+                                self.status_message = None;
                             }
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.label("Paint: primary-button drag");
+                        ui.label("Orbit: Shift + primary drag");
+                        if let Some(part) = self.solo_part {
+                            ui.label(format!("Solo: {part:?} (Escape to exit)"));
+                        } else {
+                            ui.label("Solo: Ctrl + primary click");
+                        }
+                        if let Some(hit) = self.hovered_hit {
+                            ui.add_space(8.0);
+                            ui.monospace(format!(
+                                "{:?} · {:?} · {:?}\ntexel {}, {}",
+                                hit.part, hit.layer, hit.face, hit.texel.x, hit.texel.y
+                            ));
                         }
                     });
-                ui.add_space(10.0);
-
-                ui.label("Custom RGBA");
-                for (label, channel) in ["R", "G", "B", "A"]
-                    .into_iter()
-                    .zip(self.active_color.iter_mut())
-                {
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        ui.add(egui::Slider::new(channel, 0..=255).show_value(true));
-                    });
-                }
-                let active = Color32::from_rgba_unmultiplied(
-                    self.active_color[0],
-                    self.active_color[1],
-                    self.active_color[2],
-                    self.active_color[3],
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Active");
-                    let rect = ui.allocate_space(Vec2::new(64.0, 24.0)).1;
-                    ui.painter().rect_filled(rect, 3.0, active);
-                });
-
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.document.undo_len() > 0, egui::Button::new("Undo"))
-                        .clicked()
-                    {
-                        self.finish_stroke();
-                        self.document.undo();
-                        self.status_message = None;
-                    }
-                    if ui
-                        .add_enabled(self.document.redo_len() > 0, egui::Button::new("Redo"))
-                        .clicked()
-                    {
-                        self.finish_stroke();
-                        self.document.redo();
-                        self.status_message = None;
-                    }
-                });
-
-                ui.add_space(12.0);
-                ui.separator();
-                ui.label("Paint: primary-button drag");
-                ui.label("Orbit: Shift + primary drag");
-                if let Some(part) = self.solo_part {
-                    ui.label(format!("Solo: {part:?} (Escape to exit)"));
-                } else {
-                    ui.label("Solo: Ctrl + primary click");
-                }
-                if let Some(hit) = self.hovered_hit {
-                    ui.add_space(8.0);
-                    ui.monospace(format!(
-                        "{:?} · {:?} · {:?}\ntexel {}, {}",
-                        hit.part, hit.layer, hit.face, hit.texel.x, hit.texel.y
-                    ));
-                }
             });
         panel_left
     }
@@ -402,6 +422,67 @@ impl SkinDrawApp {
     fn finish_stroke(&mut self) {
         if let Some(stroke) = self.active_stroke.take() {
             self.document.commit_stroke(stroke);
+        }
+    }
+
+    fn set_active_color(&mut self, color: [u8; 4]) {
+        self.active_color = color;
+        self.hex_color = format_hex_color(color);
+        self.hex_color_invalid = false;
+    }
+
+    fn hsv_color_controls(&mut self, ui: &mut egui::Ui) {
+        let mut hsva = egui::ecolor::Hsva::from_srgba_unmultiplied(self.active_color);
+        ui.spacing_mut().slider_width = ui.available_width().min(180.0);
+        if egui::color_picker::color_picker_hsva_2d(
+            ui,
+            &mut hsva,
+            egui::color_picker::Alpha::OnlyBlend,
+        ) {
+            self.set_active_color(hsva.to_srgba_unmultiplied());
+        }
+    }
+
+    fn rgba_color_controls(&mut self, ui: &mut egui::Ui) {
+        let mut rgba_changed = false;
+        egui::Grid::new("exact_rgba").num_columns(2).show(ui, |ui| {
+            for (label, channel) in ["R", "G", "B", "A"]
+                .into_iter()
+                .zip(self.active_color.iter_mut())
+            {
+                ui.label(label);
+                rgba_changed |= ui
+                    .add(egui::DragValue::new(channel).range(0..=255))
+                    .changed();
+                ui.end_row();
+            }
+        });
+        if rgba_changed {
+            self.hex_color = format_hex_color(self.active_color);
+            self.hex_color_invalid = false;
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Hex");
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.hex_color)
+                    .desired_width(96.0)
+                    .char_limit(9),
+            );
+            if response.changed() {
+                if let Some(color) = parse_hex_color(&self.hex_color) {
+                    self.active_color = color;
+                    self.hex_color_invalid = false;
+                } else {
+                    self.hex_color_invalid = true;
+                }
+            } else if !response.has_focus() && self.hex_color_invalid {
+                self.hex_color = format_hex_color(self.active_color);
+                self.hex_color_invalid = false;
+            }
+        });
+        if self.hex_color_invalid {
+            ui.colored_label(Color32::LIGHT_RED, "Use #RRGGBBAA");
         }
     }
 
@@ -653,6 +734,52 @@ fn view_gesture(
     }
 }
 
+fn format_hex_color(color: [u8; 4]) -> String {
+    format!(
+        "#{:02X}{:02X}{:02X}{:02X}",
+        color[0], color[1], color[2], color[3]
+    )
+}
+
+fn parse_hex_color(text: &str) -> Option<[u8; 4]> {
+    let digits = text.strip_prefix('#').unwrap_or(text);
+    if digits.len() != 8 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(u32::from_str_radix(digits, 16).ok()?.to_be_bytes())
+}
+
+fn color_swatch(ui: &mut egui::Ui, size: Vec2, color: [u8; 4]) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+    let square = 6.0;
+    let columns = (rect.width() / square).ceil() as usize;
+    let rows = (rect.height() / square).ceil() as usize;
+    for row in 0..rows {
+        for column in 0..columns {
+            let min = rect.min + Vec2::new(column as f32 * square, row as f32 * square);
+            let tile = Rect::from_min_max(min, (min + Vec2::splat(square)).min(rect.max));
+            let fill = if (row + column) % 2 == 0 {
+                Color32::from_gray(82)
+            } else {
+                Color32::from_gray(132)
+            };
+            ui.painter().rect_filled(tile, 0.0, fill);
+        }
+    }
+    ui.painter().rect_filled(
+        rect,
+        3.0,
+        Color32::from_rgba_unmultiplied(color[0], color[1], color[2], color[3]),
+    );
+    ui.painter().rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, Color32::GRAY),
+        egui::StrokeKind::Inside,
+    );
+    response
+}
+
 fn file_dialog(current: Option<PathBuf>) -> rfd::FileDialog {
     let mut dialog = rfd::FileDialog::new().add_filter("Minecraft skin PNG", &["png"]);
     if let Some(path) = current
@@ -755,6 +882,36 @@ mod tests {
         assert!(PALETTE.iter().any(|color| color[3] == 255));
         assert!(PALETTE.iter().any(|color| color[3] == 0));
         assert_eq!(PALETTE.len(), 16);
+    }
+
+    #[test]
+    fn exact_hex_rgba_round_trips_and_rejects_invalid_input() {
+        for color in [
+            [0, 0, 0, 0],
+            [255, 255, 255, 255],
+            [1, 35, 69, 103],
+            [237, 28, 36, 255],
+        ] {
+            let formatted = format_hex_color(color);
+            assert_eq!(parse_hex_color(&formatted), Some(color));
+            assert_eq!(parse_hex_color(&formatted[1..]), Some(color));
+        }
+        for invalid in ["", "#123456", "#123456789", "#GG000000", "#12 45678"] {
+            assert_eq!(parse_hex_color(invalid), None);
+        }
+    }
+
+    #[test]
+    fn color_tab_changes_do_not_change_active_rgba() {
+        let document = SkinDocument::new(ModelKind::Classic);
+        let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
+        app.set_active_color([17, 34, 51, 68]);
+        let active = app.active_color;
+        app.color_tab = ColorControlTab::Rgba;
+        assert_eq!(app.active_color, active);
+        app.color_tab = ColorControlTab::Hsv;
+        assert_eq!(app.active_color, active);
+        assert_eq!(app.hex_color, "#11223344");
     }
 
     #[test]
