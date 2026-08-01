@@ -427,3 +427,47 @@ the native app.
 
 Right-click should set the current color to the color of the pixel under the cursor, taking into
 account solo mode, etc.
+
+## Match 3D model colors to the color controls
+
+Aligned the model renderer with egui's gamma-space framebuffer convention so opaque skin texels now
+display identically to palette and active-color swatches. Added surface-format-aware compositing for
+the less common sRGB target path, removed the obsolete shade vertex attribute, and added non-white
+transfer regressions. All 51 tests and warnings-denied Clippy pass. Native screenshot measurements
+matched exactly for gray and default red, and translucent outer-layer blending was verified over a
+colored base.
+
+### Original task
+
+## Match 3D model colors to the color controls
+
+Fix the remaining color-transfer mismatch that makes midtone skin colors render darker on the 3D
+model than the same RGBA value in the palette and active-color swatch.
+
+- Correct the GPU color path in `src/renderer.rs`. Egui normally renders into a non-sRGB
+  `Rgba8Unorm` or `Bgra8Unorm` framebuffer using gamma-space UI colors, while the model currently
+  samples an sRGB offscreen texture—decoding it to linear—and writes those linear values unchanged
+  into that gamma-space framebuffer. Use a gamma-space `Rgba8Unorm` skin texture and offscreen
+  target so opaque skin bytes and alpha blending follow the same convention as egui.
+- Make final compositing respect `render_state.target_format`: pass gamma-space RGB through
+  unchanged for non-sRGB surface formats, and convert gamma-space RGB to linear before writing to
+  an sRGB surface so its hardware encoding produces the same displayed color. Select the
+  appropriate WGSL fragment entry point when constructing the composite pipeline, mirroring
+  egui-wgpu's handling of gamma and sRGB framebuffers.
+- Preserve raw skin RGBA bytes, nearest-neighbor sampling, transparency discard behavior,
+  outer-layer compositing, brush preview, solo guides, depth behavior, and texture subregion
+  uploads. Do not add lighting or directional face tinting.
+- Remove the now-redundant per-vertex `shade` attribute and associated shader plumbing so
+  directional tint cannot accidentally return.
+- Replace the previous format assertion with regression tests covering the actual transfer
+  contract: gamma-space model/intermediate formats, pass-through compositing for `Rgba8Unorm` and
+  `Bgra8Unorm`, linearized output for their sRGB variants, and neutral model vertices. Include
+  representative dark, midtone, saturated, and white RGB values so a white-only check cannot mask
+  the bug.
+- Manually compare opaque palette colors and the active-color swatch against a painted face in one
+  screenshot, away from the orange cursor preview. Representative midtones such as
+  `[128, 128, 128, 255]` and the default red `[237, 28, 36, 255]` should visually match, allowing at
+  most one 8-bit channel value of rounding. Separately verify translucent outer-layer colors
+  composite correctly over the base layer; they are context-dependent and are not expected to
+  match an isolated swatch.
+- Run `cargo fmt --check`, warnings-denied Clippy, and the full test suite.
