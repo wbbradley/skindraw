@@ -1,22 +1,5 @@
 # Next Up
 
-## Orbit with Shift-drag
-
-Replace the model view's Space + primary-button drag orbit gesture with Shift + primary-button
-drag.
-
-- Update input classification in `src/app.rs` so Shift + primary drag orbits and never paints,
-  while an unmodified primary drag continues to paint. Keep both interactions scoped to the 3D
-  view.
-- Finish any active paint stroke when the gesture changes into orbit mode so pressing or releasing
-  Shift during one pointer press cannot create an interpolated line across an orbit.
-- Preserve the existing yaw and corrected pitch directions, camera bounds, and grab/crosshair
-  cursor feedback.
-- Update the sidebar help text and its content-width measurement from Space to Shift.
-- Factor gesture classification into testable logic and cover plain paint, Shift-orbit, modifier
-  transitions, and pointer activity outside the view. Run formatting, warnings-denied Clippy, and
-  the full test suite.
-
 ## Solo a body part for hidden-face editing
 
 Add a DAW-style solo mode that exposes otherwise occluded faces of one body part.

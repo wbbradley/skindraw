@@ -174,3 +174,29 @@ brush would paint.
   renderer-adjacent tests proving only footprint texels receive preview geometry.
 - Manually verify that the preview matches the resulting stroke on opaque and transparent faces
   from several camera angles, then run formatting, warnings-denied Clippy, and the full test suite.
+
+## Orbit with Shift-drag
+
+Replaced Space-drag orbit with Shift-drag and centralized model-view gesture classification so
+modified drags orbit, plain drags paint, and input outside the view does neither. Entering orbit
+commits any active stroke to prevent interpolation across camera movement. Updated help and cursor
+behavior, added modifier-transition tests, and verified the native Shift-drag rotates the model.
+
+### Original task
+
+## Orbit with Shift-drag
+
+Replace the model view's Space + primary-button drag orbit gesture with Shift + primary-button
+drag.
+
+- Update input classification in `src/app.rs` so Shift + primary drag orbits and never paints,
+  while an unmodified primary drag continues to paint. Keep both interactions scoped to the 3D
+  view.
+- Finish any active paint stroke when the gesture changes into orbit mode so pressing or releasing
+  Shift during one pointer press cannot create an interpolated line across an orbit.
+- Preserve the existing yaw and corrected pitch directions, camera bounds, and grab/crosshair
+  cursor feedback.
+- Update the sidebar help text and its content-width measurement from Space to Shift.
+- Factor gesture classification into testable logic and cover plain paint, Shift-orbit, modifier
+  transitions, and pointer activity outside the view. Run formatting, warnings-denied Clippy, and
+  the full test suite.

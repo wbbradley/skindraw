@@ -61,6 +61,13 @@ enum ConfirmationChoice {
     Cancel,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewGesture {
+    Idle,
+    Paint,
+    Orbit,
+}
+
 pub struct SkinDrawApp {
     document: SkinDocument,
     kind: ModelKind,
@@ -275,7 +282,7 @@ impl SkinDrawApp {
                 ui.add_space(12.0);
                 ui.separator();
                 ui.label("Paint: primary-button drag");
-                ui.label("Orbit: Space + primary drag");
+                ui.label("Orbit: Shift + primary drag");
                 if let Some(hit) = self.hovered_hit {
                     ui.add_space(8.0);
                     ui.monospace(format!(
@@ -291,10 +298,12 @@ impl SkinDrawApp {
         let mut rect = ui.available_rect_before_wrap();
         rect.max.x = rect.max.x.min(tools_left);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let space = ctx.input(|input| input.key_down(Key::Space));
-        let primary_down = ctx.input(|input| {
-            input.pointer.button_down(PointerButton::Primary)
-                || input.pointer.button_pressed(PointerButton::Primary)
+        let (shift, primary_down) = ctx.input(|input| {
+            (
+                input.modifiers.shift,
+                input.pointer.button_down(PointerButton::Primary)
+                    || input.pointer.button_pressed(PointerButton::Primary),
+            )
         });
         let primary_released =
             ctx.input(|input| input.pointer.button_released(PointerButton::Primary));
@@ -303,26 +312,27 @@ impl SkinDrawApp {
             || response.clicked_by(PointerButton::Primary)
             || response.dragged_by(PointerButton::Primary);
 
-        let orbiting = space && primary_down && pointer_in_view;
-        if orbiting {
-            let delta = ctx.input(|input| input.pointer.delta());
-            self.camera.orbit(-delta.x * 0.012, delta.y * 0.012);
-        }
-
         let pointer = response
             .interact_pointer_pos()
             .or_else(|| response.hover_pos());
         self.hovered_hit = pointer.and_then(|position| self.hit_at(rect, position));
 
-        if !space
-            && primary_down
-            && pointer_in_view
-            && let Some(hit) = self.hovered_hit
-        {
-            let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
-            self.document
-                .paint(stroke, self.kind, hit, self.brush_size, self.active_color);
-            self.status_message = None;
+        let gesture = view_gesture(pointer_in_view, primary_down, shift);
+        match gesture {
+            ViewGesture::Orbit => {
+                self.finish_stroke();
+                let delta = ctx.input(|input| input.pointer.delta());
+                self.camera.orbit(-delta.x * 0.012, delta.y * 0.012);
+            }
+            ViewGesture::Paint => {
+                if let Some(hit) = self.hovered_hit {
+                    let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
+                    self.document
+                        .paint(stroke, self.kind, hit, self.brush_size, self.active_color);
+                    self.status_message = None;
+                }
+            }
+            ViewGesture::Idle => {}
         }
         if primary_released {
             self.finish_stroke();
@@ -341,13 +351,17 @@ impl SkinDrawApp {
                 camera: self.camera,
                 skin,
                 texture_update,
-                preview_hit: if orbiting { None } else { self.hovered_hit },
+                preview_hit: if gesture == ViewGesture::Orbit {
+                    None
+                } else {
+                    self.hovered_hit
+                },
                 brush_size: self.brush_size,
             }
             .paint_callback(),
         );
 
-        if space && response.hovered() {
+        if shift && response.hovered() {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         } else if self.hovered_hit.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -585,6 +599,14 @@ fn consume(ctx: &egui::Context, shortcut: KeyboardShortcut) -> bool {
     ctx.input_mut(|input| input.consume_shortcut(&shortcut))
 }
 
+fn view_gesture(pointer_in_view: bool, primary_down: bool, shift: bool) -> ViewGesture {
+    match (pointer_in_view, primary_down, shift) {
+        (true, true, true) => ViewGesture::Orbit,
+        (true, true, false) => ViewGesture::Paint,
+        _ => ViewGesture::Idle,
+    }
+}
+
 fn file_dialog(current: Option<PathBuf>) -> rfd::FileDialog {
     let mut dialog = rfd::FileDialog::new().add_filter("Minecraft skin PNG", &["png"]);
     if let Some(path) = current
@@ -616,7 +638,7 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
     let body_text_width = [
         "Enable a layer to paint.",
         "Paint: primary-button drag",
-        "Orbit: Space + primary drag",
+        "Orbit: Shift + primary drag",
     ]
     .into_iter()
     .map(|text| {
@@ -695,6 +717,28 @@ mod tests {
             [1, 2, 4]
         );
         assert_eq!(Texel::new(1, 2).x, 1);
+    }
+
+    #[test]
+    fn model_view_gestures_separate_paint_orbit_and_outside_input() {
+        assert_eq!(view_gesture(true, true, false), ViewGesture::Paint);
+        assert_eq!(view_gesture(true, true, true), ViewGesture::Orbit);
+        assert_eq!(view_gesture(false, true, false), ViewGesture::Idle);
+        assert_eq!(view_gesture(false, true, true), ViewGesture::Idle);
+        assert_eq!(view_gesture(true, false, true), ViewGesture::Idle);
+
+        let drag_transition =
+            [false, false, true, true, false].map(|shift| view_gesture(true, true, shift));
+        assert_eq!(
+            drag_transition,
+            [
+                ViewGesture::Paint,
+                ViewGesture::Paint,
+                ViewGesture::Orbit,
+                ViewGesture::Orbit,
+                ViewGesture::Paint,
+            ]
+        );
     }
 
     #[test]
