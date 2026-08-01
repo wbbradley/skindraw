@@ -4,7 +4,7 @@ use glam::{Vec2, Vec3};
 
 use crate::{
     atlas::face_region,
-    model::{Face, Layer, ModelBox, ModelHit, ModelKind, Ray, model_boxes},
+    model::{BodyPart, Face, Layer, ModelBox, ModelHit, ModelKind, Ray, model_boxes},
 };
 
 const PITCH_MARGIN: f32 = 0.001;
@@ -110,9 +110,19 @@ impl Camera {
 }
 
 pub fn pick_model(ray: Ray, kind: ModelKind, visibility: LayerVisibility) -> Option<ModelHit> {
+    pick_model_part(ray, kind, visibility, None)
+}
+
+pub fn pick_model_part(
+    ray: Ray,
+    kind: ModelKind,
+    visibility: LayerVisibility,
+    part: Option<BodyPart>,
+) -> Option<ModelHit> {
     model_boxes(kind)
         .into_iter()
         .filter(|model_box| visibility.includes(model_box.layer))
+        .filter(|model_box| part.is_none_or(|part| model_box.part == part))
         .filter_map(|model_box| intersect_box(ray, model_box).map(|hit| (model_box, hit)))
         .filter_map(|(model_box, (distance, face, point))| {
             let region = face_region(kind, model_box.part, model_box.layer, face);
@@ -340,5 +350,41 @@ mod tests {
             pick_model(narrow_edge, ModelKind::Classic, LayerVisibility::BASE_ONLY).unwrap();
         assert_eq!(classic.part, BodyPart::RightArm);
         assert!(pick_model(narrow_edge, ModelKind::Slim, LayerVisibility::BASE_ONLY).is_none());
+    }
+
+    #[test]
+    fn body_part_filter_excludes_other_cuboids_from_picking() {
+        let front_ray = ray(Vec3::new(0.5, 28.5, 40.0), -Vec3::Z);
+        assert_eq!(
+            pick_model_part(
+                front_ray,
+                ModelKind::Classic,
+                LayerVisibility::ALL,
+                Some(BodyPart::Head),
+            )
+            .unwrap()
+            .part,
+            BodyPart::Head
+        );
+        assert!(
+            pick_model_part(
+                front_ray,
+                ModelKind::Classic,
+                LayerVisibility::ALL,
+                Some(BodyPart::LeftLeg),
+            )
+            .is_none()
+        );
+
+        let through_body = ray(Vec3::new(40.0, 18.0, 0.0), -Vec3::X);
+        let hidden_arm_face = pick_model_part(
+            through_body,
+            ModelKind::Classic,
+            LayerVisibility::BASE_ONLY,
+            Some(BodyPart::RightArm),
+        )
+        .unwrap();
+        assert_eq!(hidden_arm_face.part, BodyPart::RightArm);
+        assert_eq!(hidden_arm_face.face, Face::Left);
     }
 }

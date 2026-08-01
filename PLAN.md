@@ -1,28 +1,5 @@
 # Next Up
 
-## Solo a body part for hidden-face editing
-
-Add a DAW-style solo mode that exposes otherwise occluded faces of one body part.
-
-- Track `Option<BodyPart>` presentation state in `SkinDrawApp`. Ctrl + primary click on a valid
-  model hit enters solo mode for that whole body part and consumes the click without painting;
-  Escape exits solo mode. Solo state must not modify skin pixels, dirty state, or history.
-- While soloed, render and pick only the selected body part's textured base and outer geometry,
-  still honoring the existing layer visibility toggles. A body part means both nested cuboids: its
-  base skin and its outer clothing layer.
-- Render faint, untextured edge outlines for each of the other five body parts so their spatial
-  relationship remains visible without occluding or intercepting paint hits. Outline each part
-  once using its base cuboid rather than duplicating edges for its outer layer, and use a dedicated
-  line pipeline or equivalent renderer path with low alpha and no texture sampling or depth writes.
-- Keep Shift-drag orbit fully available in solo mode. Ensure ordinary primary dragging paints newly
-  exposed inner faces and Ctrl-click never begins a stroke.
-- Reset solo mode when replacing the document, display the active solo part and Escape hint in the
-  sidebar, and keep normal rendering and picking unchanged when no part is soloed.
-- Extend picking and geometry helpers with an explicit body-part filter. Test entry and exit input
-  behavior, selected-part picking, solid-geometry filtering, faint outline generation, layer
-  toggles, and unchanged document state. Manually verify arm and leg interior faces can be painted,
-  then run formatting, warnings-denied Clippy, and the full test suite.
-
 ## Add full-range tabbed color controls
 
 Replace the current coarse color-editing presentation with compact standard color-picker tabs while

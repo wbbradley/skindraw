@@ -11,8 +11,8 @@ use eframe::{
 use glam::{Mat4, Vec3};
 
 use crate::{
-    BrushSize, Camera, Face, Layer, LayerVisibility, ModelHit, ModelKind, Skin, brush_footprint,
-    face_region, model_boxes,
+    BodyPart, BrushSize, Camera, Face, Layer, LayerVisibility, ModelHit, ModelKind, Skin,
+    brush_footprint, face_region, model_boxes,
     skin::{SKIN_HEIGHT, SKIN_WIDTH},
 };
 
@@ -74,6 +74,7 @@ pub struct ModelPaintCallback {
     pub texture_update: Option<TextureUpdate>,
     pub preview_hit: Option<ModelHit>,
     pub brush_size: BrushSize,
+    pub solo_part: Option<BodyPart>,
 }
 
 impl ModelPaintCallback {
@@ -133,6 +134,20 @@ struct PreviewVertex {
     position: [f32; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GuideVertex {
+    position: [f32; 3],
+}
+
+impl GuideVertex {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: size_of::<Self>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+    };
+}
+
 impl PreviewVertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: size_of::<Self>() as u64,
@@ -159,6 +174,7 @@ struct RenderTargets {
 pub struct ModelRenderer {
     model_pipeline: wgpu::RenderPipeline,
     preview_pipeline: wgpu::RenderPipeline,
+    guide_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     skin_texture: wgpu::Texture,
     skin_bind_group: wgpu::BindGroup,
@@ -169,6 +185,8 @@ pub struct ModelRenderer {
     vertex_count: u32,
     preview_buffer: wgpu::Buffer,
     preview_vertex_count: u32,
+    guide_buffer: wgpu::Buffer,
+    guide_vertex_count: u32,
     composite_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     targets: Option<RenderTargets>,
@@ -367,6 +385,50 @@ impl ModelRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let guide_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("solo guide shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(GUIDE_SHADER)),
+        });
+        let guide_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("solo guide pipeline layout"),
+            bind_group_layouts: &[Some(&scene_layout)],
+            immediate_size: 0,
+        });
+        let guide_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("solo guide pipeline"),
+            layout: Some(&guide_layout),
+            vertex: wgpu::VertexState {
+                module: &guide_shader,
+                entry_point: Some("vertex_main"),
+                buffers: &[GuideVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &guide_shader,
+                entry_point: Some("fragment_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model composite layout"),
@@ -437,9 +499,16 @@ impl ModelRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let guide_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("solo guide vertices"),
+            size: (BodyPart::ALL.len() * 12 * 2 * size_of::<GuideVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut renderer = Self {
             model_pipeline,
             preview_pipeline,
+            guide_pipeline,
             composite_pipeline,
             skin_texture,
             skin_bind_group,
@@ -450,6 +519,8 @@ impl ModelRenderer {
             vertex_count: 0,
             preview_buffer,
             preview_vertex_count: 0,
+            guide_buffer,
+            guide_vertex_count: 0,
             composite_layout,
             sampler,
             targets: None,
@@ -477,7 +548,7 @@ impl ModelRenderer {
             .max(1.0) as u32;
         self.ensure_targets(device, [width, height]);
 
-        let vertices = model_vertices(callback.kind, callback.visibility);
+        let vertices = model_vertices(callback.kind, callback.visibility, callback.solo_part);
         debug_assert!(vertices.len() <= self.vertex_capacity);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         self.vertex_count = vertices.len() as u32;
@@ -490,6 +561,11 @@ impl ModelRenderer {
             bytemuck::cast_slice(&preview_vertices),
         );
         self.preview_vertex_count = preview_vertices.len() as u32;
+        let guide_vertices = callback
+            .solo_part
+            .map_or_else(Vec::new, |part| guide_vertices(callback.kind, part));
+        queue.write_buffer(&self.guide_buffer, 0, bytemuck::cast_slice(&guide_vertices));
+        self.guide_vertex_count = guide_vertices.len() as u32;
         let aspect = width as f32 / height as f32;
         let half_height = callback.camera.orthographic_height * 0.5;
         let half_width = half_height * aspect;
@@ -545,6 +621,12 @@ impl ModelRenderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if self.guide_vertex_count > 0 {
+            pass.set_pipeline(&self.guide_pipeline);
+            pass.set_bind_group(0, &self.scene_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.guide_buffer.slice(..));
+            pass.draw(0..self.guide_vertex_count, 0..1);
+        }
         pass.set_pipeline(&self.model_pipeline);
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
         pass.set_bind_group(1, &self.skin_bind_group, &[]);
@@ -666,7 +748,11 @@ fn camera_up(camera: Camera) -> Vec3 {
     right.cross(camera.view_direction()).normalize_or_zero()
 }
 
-fn model_vertices(kind: ModelKind, visibility: LayerVisibility) -> Vec<Vertex> {
+fn model_vertices(
+    kind: ModelKind,
+    visibility: LayerVisibility,
+    part: Option<BodyPart>,
+) -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(12 * 6 * 6);
     for layer in [Layer::Base, Layer::Outer] {
         let visible = match layer {
@@ -678,7 +764,7 @@ fn model_vertices(kind: ModelKind, visibility: LayerVisibility) -> Vec<Vertex> {
         }
         for model_box in model_boxes(kind)
             .into_iter()
-            .filter(|item| item.layer == layer)
+            .filter(|item| item.layer == layer && part.is_none_or(|part| item.part == part))
         {
             for face in Face::ALL {
                 let corners = face_corners(model_box.min, model_box.max, face);
@@ -705,6 +791,50 @@ fn model_vertices(kind: ModelKind, visibility: LayerVisibility) -> Vec<Vertex> {
                 ];
                 vertices.extend_from_slice(&quad);
             }
+        }
+    }
+    vertices
+}
+
+fn guide_vertices(kind: ModelKind, solo_part: BodyPart) -> Vec<GuideVertex> {
+    const EDGES: [(usize, usize); 12] = [
+        (0, 1),
+        (1, 5),
+        (5, 4),
+        (4, 0),
+        (2, 3),
+        (3, 7),
+        (7, 6),
+        (6, 2),
+        (0, 2),
+        (1, 3),
+        (5, 7),
+        (4, 6),
+    ];
+    let mut vertices = Vec::with_capacity((BodyPart::ALL.len() - 1) * EDGES.len() * 2);
+    for model_box in model_boxes(kind)
+        .into_iter()
+        .filter(|item| item.layer == Layer::Base && item.part != solo_part)
+    {
+        let min = model_box.min;
+        let max = model_box.max;
+        let corners = [
+            Vec3::new(min.x, min.y, min.z),
+            Vec3::new(max.x, min.y, min.z),
+            Vec3::new(min.x, max.y, min.z),
+            Vec3::new(max.x, max.y, min.z),
+            Vec3::new(min.x, min.y, max.z),
+            Vec3::new(max.x, min.y, max.z),
+            Vec3::new(min.x, max.y, max.z),
+            Vec3::new(max.x, max.y, max.z),
+        ];
+        for (start, end) in EDGES {
+            vertices.push(GuideVertex {
+                position: corners[start].to_array(),
+            });
+            vertices.push(GuideVertex {
+                position: corners[end].to_array(),
+            });
         }
     }
     vertices
@@ -892,6 +1022,24 @@ fn fragment_main() -> @location(0) vec4<f32> {
 }
 "#;
 
+const GUIDE_SHADER: &str = r#"
+struct Scene {
+    view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> scene: Scene;
+
+@vertex
+fn vertex_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return scene.view_projection * vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fragment_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.72, 0.78, 0.88, 0.16);
+}
+"#;
+
 const COMPOSITE_SHADER: &str = r#"
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
@@ -962,10 +1110,23 @@ mod tests {
 
     #[test]
     fn visibility_and_hit_control_generated_geometry() {
-        let base = model_vertices(ModelKind::Classic, LayerVisibility::BASE_ONLY);
-        let all = model_vertices(ModelKind::Classic, LayerVisibility::ALL);
+        let base = model_vertices(ModelKind::Classic, LayerVisibility::BASE_ONLY, None);
+        let all = model_vertices(ModelKind::Classic, LayerVisibility::ALL, None);
         assert_eq!(base.len(), 6 * 6 * 6);
         assert_eq!(all.len(), 12 * 6 * 6);
+        let solo = model_vertices(
+            ModelKind::Classic,
+            LayerVisibility::ALL,
+            Some(BodyPart::RightArm),
+        );
+        assert_eq!(solo.len(), 2 * 6 * 6);
+    }
+
+    #[test]
+    fn solo_guides_outline_each_other_body_part_once() {
+        let guides = guide_vertices(ModelKind::Classic, BodyPart::RightArm);
+        assert_eq!(guides.len(), 5 * 12 * 2);
+        assert!(guides.iter().all(|vertex| vertex.position[0] >= -4.0));
     }
 
     #[test]

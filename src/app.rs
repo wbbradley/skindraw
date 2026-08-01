@@ -6,8 +6,8 @@ use eframe::egui::{
 use glam::Vec2 as ModelVec2;
 
 use crate::{
-    BrushSize, Camera, LayerVisibility, ModelHit, ModelKind, Skin, SkinDocument, StrokeBuilder,
-    pick_model,
+    BodyPart, BrushSize, Camera, LayerVisibility, ModelHit, ModelKind, Skin, SkinDocument,
+    StrokeBuilder, pick_model_part,
     renderer::{ModelPaintCallback, ModelRenderer, TextureUpdate},
 };
 
@@ -66,6 +66,7 @@ enum ViewGesture {
     Idle,
     Paint,
     Orbit,
+    Solo,
 }
 
 pub struct SkinDrawApp {
@@ -77,6 +78,7 @@ pub struct SkinDrawApp {
     active_color: [u8; 4],
     active_stroke: Option<StrokeBuilder>,
     hovered_hit: Option<ModelHit>,
+    solo_part: Option<BodyPart>,
     uploaded_skin: Skin,
     pending_action: Option<DocumentAction>,
     error_message: Option<String>,
@@ -110,6 +112,7 @@ impl SkinDrawApp {
             active_color: [237, 28, 36, 255],
             active_stroke: None,
             hovered_hit: None,
+            solo_part: None,
             pending_action: None,
             error_message: None,
             status_message: None,
@@ -283,6 +286,11 @@ impl SkinDrawApp {
                 ui.separator();
                 ui.label("Paint: primary-button drag");
                 ui.label("Orbit: Shift + primary drag");
+                if let Some(part) = self.solo_part {
+                    ui.label(format!("Solo: {part:?} (Escape to exit)"));
+                } else {
+                    ui.label("Solo: Ctrl + primary click");
+                }
                 if let Some(hit) = self.hovered_hit {
                     ui.add_space(8.0);
                     ui.monospace(format!(
@@ -298,11 +306,13 @@ impl SkinDrawApp {
         let mut rect = ui.available_rect_before_wrap();
         rect.max.x = rect.max.x.min(tools_left);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let (shift, primary_down) = ctx.input(|input| {
+        let (shift, control, primary_down, primary_pressed) = ctx.input(|input| {
             (
                 input.modifiers.shift,
+                input.modifiers.ctrl,
                 input.pointer.button_down(PointerButton::Primary)
                     || input.pointer.button_pressed(PointerButton::Primary),
+                input.pointer.button_pressed(PointerButton::Primary),
             )
         });
         let primary_released =
@@ -317,7 +327,13 @@ impl SkinDrawApp {
             .or_else(|| response.hover_pos());
         self.hovered_hit = pointer.and_then(|position| self.hit_at(rect, position));
 
-        let gesture = view_gesture(pointer_in_view, primary_down, shift);
+        let gesture = view_gesture(
+            pointer_in_view,
+            primary_down,
+            primary_pressed,
+            shift,
+            control,
+        );
         match gesture {
             ViewGesture::Orbit => {
                 self.finish_stroke();
@@ -330,6 +346,11 @@ impl SkinDrawApp {
                     self.document
                         .paint(stroke, self.kind, hit, self.brush_size, self.active_color);
                     self.status_message = None;
+                }
+            }
+            ViewGesture::Solo => {
+                if let Some(hit) = self.hovered_hit {
+                    self.enter_solo(hit.part);
                 }
             }
             ViewGesture::Idle => {}
@@ -357,6 +378,7 @@ impl SkinDrawApp {
                     self.hovered_hit
                 },
                 brush_size: self.brush_size,
+                solo_part: self.solo_part,
             }
             .paint_callback(),
         );
@@ -374,7 +396,7 @@ impl SkinDrawApp {
             ModelVec2::new(rect.min.x, rect.min.y),
             ModelVec2::new(rect.width(), rect.height()),
         )?;
-        pick_model(ray, self.kind, self.visibility)
+        pick_model_part(ray, self.kind, self.visibility, self.solo_part)
     }
 
     fn finish_stroke(&mut self) {
@@ -383,7 +405,17 @@ impl SkinDrawApp {
         }
     }
 
+    fn enter_solo(&mut self, part: BodyPart) {
+        self.finish_stroke();
+        self.solo_part = Some(part);
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.solo_part.is_some()
+            && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            self.solo_part = None;
+        }
         if consume(ctx, SAVE_AS_SHORTCUT) {
             self.save_as();
         } else if consume(ctx, SAVE_SHORTCUT) {
@@ -431,6 +463,7 @@ impl SkinDrawApp {
         self.document = document;
         self.kind = kind;
         self.hovered_hit = None;
+        self.solo_part = None;
         self.status_message = None;
     }
 
@@ -599,10 +632,23 @@ fn consume(ctx: &egui::Context, shortcut: KeyboardShortcut) -> bool {
     ctx.input_mut(|input| input.consume_shortcut(&shortcut))
 }
 
-fn view_gesture(pointer_in_view: bool, primary_down: bool, shift: bool) -> ViewGesture {
-    match (pointer_in_view, primary_down, shift) {
-        (true, true, true) => ViewGesture::Orbit,
-        (true, true, false) => ViewGesture::Paint,
+fn view_gesture(
+    pointer_in_view: bool,
+    primary_down: bool,
+    primary_pressed: bool,
+    shift: bool,
+    control: bool,
+) -> ViewGesture {
+    match (
+        pointer_in_view,
+        primary_down,
+        primary_pressed,
+        shift,
+        control,
+    ) {
+        (true, true, true, _, true) => ViewGesture::Solo,
+        (true, true, _, true, false) => ViewGesture::Orbit,
+        (true, true, _, false, false) => ViewGesture::Paint,
         _ => ViewGesture::Idle,
     }
 }
@@ -639,6 +685,7 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
         "Enable a layer to paint.",
         "Paint: primary-button drag",
         "Orbit: Shift + primary drag",
+        "Solo: RightArm (Escape to exit)",
     ]
     .into_iter()
     .map(|text| {
@@ -721,14 +768,29 @@ mod tests {
 
     #[test]
     fn model_view_gestures_separate_paint_orbit_and_outside_input() {
-        assert_eq!(view_gesture(true, true, false), ViewGesture::Paint);
-        assert_eq!(view_gesture(true, true, true), ViewGesture::Orbit);
-        assert_eq!(view_gesture(false, true, false), ViewGesture::Idle);
-        assert_eq!(view_gesture(false, true, true), ViewGesture::Idle);
-        assert_eq!(view_gesture(true, false, true), ViewGesture::Idle);
+        assert_eq!(
+            view_gesture(true, true, true, false, false),
+            ViewGesture::Paint
+        );
+        assert_eq!(
+            view_gesture(true, true, true, true, false),
+            ViewGesture::Orbit
+        );
+        assert_eq!(
+            view_gesture(false, true, true, false, false),
+            ViewGesture::Idle
+        );
+        assert_eq!(
+            view_gesture(false, true, true, true, false),
+            ViewGesture::Idle
+        );
+        assert_eq!(
+            view_gesture(true, false, false, true, false),
+            ViewGesture::Idle
+        );
 
-        let drag_transition =
-            [false, false, true, true, false].map(|shift| view_gesture(true, true, shift));
+        let drag_transition = [false, false, true, true, false]
+            .map(|shift| view_gesture(true, true, false, shift, false));
         assert_eq!(
             drag_transition,
             [
@@ -742,8 +804,41 @@ mod tests {
     }
 
     #[test]
+    fn control_press_solos_once_and_consumes_the_held_drag() {
+        assert_eq!(
+            view_gesture(true, true, true, false, true),
+            ViewGesture::Solo
+        );
+        assert_eq!(
+            view_gesture(true, true, false, false, true),
+            ViewGesture::Idle
+        );
+        assert_eq!(
+            view_gesture(true, true, true, true, true),
+            ViewGesture::Solo
+        );
+    }
+
+    #[test]
+    fn solo_mode_is_document_independent_presentation_state() {
+        let document = SkinDocument::new(ModelKind::Classic);
+        let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
+        let skin = app.document.skin().clone();
+        app.enter_solo(BodyPart::RightArm);
+        assert_eq!(app.solo_part, Some(BodyPart::RightArm));
+        assert_eq!(app.document.skin(), &skin);
+        assert!(!app.document.is_dirty());
+        assert_eq!(app.document.undo_len(), 0);
+        assert_eq!(app.document.redo_len(), 0);
+        app.solo_part = None;
+        assert_eq!(app.document.skin(), &skin);
+        assert!(!app.document.is_dirty());
+    }
+
+    #[test]
     fn dirty_replacement_is_guarded_and_discard_replaces_atomically() {
         let mut app = dirty_app();
+        app.solo_part = Some(BodyPart::Head);
         let changed = app.document.skin().clone();
         let ctx = egui::Context::default();
         app.request_action(DocumentAction::New(ModelKind::Slim), &ctx);
@@ -757,6 +852,7 @@ mod tests {
         app.pending_action = None;
         app.execute_action(DocumentAction::New(ModelKind::Slim), &ctx);
         assert_eq!(app.kind, ModelKind::Slim);
+        assert_eq!(app.solo_part, None);
         assert!(!app.document.is_dirty());
         assert_ne!(app.document.skin(), &changed);
         assert_eq!(app.document.undo_len(), 0);
