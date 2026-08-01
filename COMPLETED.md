@@ -412,3 +412,18 @@ app.
 ## Color rendering
 
 Colors in the color palette are brighter than they render on the 3d skin in the drawing area. White from the underlying cuboids appears whiter than a pure white selected pain color, as a comparison.
+
+## Right-click behavior
+
+Added secondary-button color sampling to the 3D model view. Sampling uses the same visibility- and
+solo-aware hit result as painting, copies the target texel's exact RGBA value into all active color
+controls, and leaves the skin document and history unchanged. Added gesture and state regression
+tests, passed all 50 tests, and verified transparent outer-layer and opaque base-layer sampling in
+the native app.
+
+### Original task
+
+## Right-click behavior
+
+Right-click should set the current color to the color of the pixel under the cursor, taking into
+account solo mode, etc.
