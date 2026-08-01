@@ -334,3 +334,67 @@ color.
   RGBA matching, transparent fills, no-op fills, keyboard tool switching, and undo/redo grouping.
   Manually verify fills on base, outer, soloed interior, and flipped atlas faces, then run
   formatting, warnings-denied Clippy, and the full test suite.
+
+## Package and publish SkinDraw for Ubuntu desktops
+
+Added `cargo-deb` metadata, a GNOME desktop entry, a matching Wayland application ID, an original
+pixel-head SVG icon, and Ubuntu installation and release documentation. Added a tag-driven and
+manually dispatchable GitHub Actions workflow with isolated publication permissions, version/tag
+validation, current artifact actions, full Rust gates, Debian metadata and layout checks, and a
+disposable Ubuntu 22.04 install/upgrade/removal test. Manually dispatched the non-publishing
+workflow successfully and independently verified its `skindraw_0.1.0-1_amd64.deb` artifact and
+SHA-256 report. Per the rollout decision, no tag or GitHub Release was created and `box` was not
+modified.
+
+### Original task
+
+## Package and publish SkinDraw for Ubuntu desktops
+
+Add a native amd64 Debian package and a tag-driven GitHub Actions release path so an Ubuntu user
+can install SkinDraw system-wide with APT and launch it from GNOME without installing Rust or
+checking out the repository. Build on GitHub's `ubuntu-22.04` runner so the glibc-linked binary runs
+on Ubuntu 22.04 and newer, including the audited Ubuntu 24.04 GNOME/Wayland host `box`.
+
+- Add the package metadata needed by `cargo-deb` to `Cargo.toml`: description, repository and
+  maintainer information, Debian section and priority, automatic runtime dependencies, and explicit
+  assets. Pin the CI-installed `cargo-deb` version rather than silently taking an arbitrary future
+  release. Do not invent a project license; licensing remains a separate owner decision.
+- Add `io.github.wbbradley.SkinDraw.desktop` with `Type=Application`, `Name=SkinDraw`,
+  `Exec=skindraw`, `Icon=io.github.wbbradley.SkinDraw`, `Terminal=false`, and an appropriate
+  graphics category. Do not advertise PNG MIME handling or use an `%f` argument unless startup is
+  also taught to open a supplied file.
+- Add a simple original SkinDraw application icon in a standard scalable or multi-resolution form.
+  Package the binary at `/usr/bin/skindraw`, the desktop entry at
+  `/usr/share/applications/io.github.wbbradley.SkinDraw.desktop`, and the icon under the matching
+  hicolor icon-theme path in `/usr/share/icons/hicolor/`.
+- Set the root eframe viewport's Wayland application ID in `src/main.rs` to exactly
+  `io.github.wbbradley.SkinDraw`, matching the desktop filename without `.desktop`, so GNOME groups
+  the running window with its launcher and icon. Preserve Wayland, X11 fallback, WGPU, and XDG
+  portal behavior.
+- Add `.github/workflows/release-linux.yml`. Run on version tags matching `v*` with
+  `ubuntu-22.04`, use the locked Cargo dependency graph, install only the native build and packaging
+  dependencies actually required, run formatting, tests, and warnings-denied Clippy, build the
+  amd64 `.deb` with `cargo-deb`, and inspect its archive and control metadata before publication.
+  Fail clearly when a `vX.Y.Z` tag does not match `package.version`.
+- Give the release job `contents: write` only where publication requires it. Publish the generated
+  `.deb` to the matching GitHub Release with generated notes. Also provide a safe, non-publishing
+  `workflow_dispatch` path that uploads the `.deb` as a workflow artifact, allowing packaging to be
+  tested without creating a release or tag.
+- Document the maintainer flow for dispatching a package build and creating a matching version tag,
+  plus the child-machine flow for downloading the release asset and running
+  `sudo apt install ./...amd64.deb`. State the amd64 architecture and Ubuntu 22.04 baseline, explain
+  that upgrades install a newer `.deb`, and leave Flatpak, Snap, a PPA, automatic client updates,
+  arm64, and Rust installation on target machines out of scope.
+- Validate desktop-entry syntax, icon lookup name, package contents and executable permissions, and
+  Debian architecture, version, and dependency metadata. Test clean install and upgrade behavior in
+  an appropriate Ubuntu environment. Record the exact build and runtime dependency lists learned
+  from the package rather than relying on guessed libraries.
+- After obtaining explicit approval for remote installation, smoke-test a CI-built package on
+  `box` without adding a Rust toolchain: confirm it appears in GNOME application search with its
+  icon, launches with correct dock/window grouping, renders through WGPU, and opens and saves through
+  the portal. Similarly, do not push a public version tag or create a GitHub Release without explicit
+  release authorization; the workflow and non-publishing artifact build can land independently.
+- Run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and the full
+  Rust test suite. The implementation is ready when a manually dispatched workflow produces a
+  correctly structured installable artifact; publication and target-machine installation remain
+  approval-gated operations.
