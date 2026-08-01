@@ -174,7 +174,7 @@ jobs:
           echo "metadata_path=$metadata_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: skindraw-ubuntu-amd64
           path: |
@@ -193,7 +193,7 @@ jobs:
 
     steps:
       - name: Download package artifact
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           name: skindraw-ubuntu-amd64
           path: release-artifact
