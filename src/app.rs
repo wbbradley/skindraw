@@ -73,6 +73,7 @@ enum ViewGesture {
     Paint,
     Orbit,
     Solo,
+    Sample,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -350,6 +351,7 @@ impl SkinDrawApp {
                         ui.separator();
                         ui.label("Brush: primary-button drag");
                         ui.label("Fill: primary-button click");
+                        ui.label("Sample: secondary-button click");
                         ui.label("Orbit: Shift + primary drag");
                         if let Some(part) = self.solo_part {
                             ui.label(format!("Solo: {part:?} (Escape to exit)"));
@@ -372,15 +374,17 @@ impl SkinDrawApp {
         let mut rect = ui.available_rect_before_wrap();
         rect.max.x = rect.max.x.min(tools_left);
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let (shift, control, primary_down, primary_pressed) = ctx.input(|input| {
-            (
-                input.modifiers.shift,
-                input.modifiers.ctrl,
-                input.pointer.button_down(PointerButton::Primary)
-                    || input.pointer.button_pressed(PointerButton::Primary),
-                input.pointer.button_pressed(PointerButton::Primary),
-            )
-        });
+        let (shift, control, primary_down, primary_pressed, secondary_pressed) =
+            ctx.input(|input| {
+                (
+                    input.modifiers.shift,
+                    input.modifiers.ctrl,
+                    input.pointer.button_down(PointerButton::Primary)
+                        || input.pointer.button_pressed(PointerButton::Primary),
+                    input.pointer.button_pressed(PointerButton::Primary),
+                    input.pointer.button_pressed(PointerButton::Secondary),
+                )
+            });
         let primary_released =
             ctx.input(|input| input.pointer.button_released(PointerButton::Primary));
 
@@ -397,6 +401,7 @@ impl SkinDrawApp {
             pointer_in_view,
             primary_down,
             primary_pressed,
+            secondary_pressed,
             shift,
             control,
         );
@@ -432,6 +437,13 @@ impl SkinDrawApp {
             ViewGesture::Solo => {
                 if let Some(hit) = self.hovered_hit {
                     self.enter_solo(hit.part);
+                }
+            }
+            ViewGesture::Sample => {
+                self.finish_stroke();
+                if let Some(hit) = self.hovered_hit {
+                    self.sample_color(hit);
+                    self.status_message = None;
                 }
             }
             ViewGesture::Idle => {}
@@ -501,6 +513,10 @@ impl SkinDrawApp {
         self.active_color = color;
         self.hex_color = format_hex_color(color);
         self.hex_color_invalid = false;
+    }
+
+    fn sample_color(&mut self, hit: ModelHit) {
+        self.set_active_color(self.document.skin().pixel(hit.texel));
     }
 
     fn store_palette_color(&mut self, index: usize) {
@@ -825,6 +841,7 @@ fn view_gesture(
     pointer_in_view: bool,
     primary_down: bool,
     primary_pressed: bool,
+    secondary_pressed: bool,
     shift: bool,
     control: bool,
 ) -> ViewGesture {
@@ -832,12 +849,14 @@ fn view_gesture(
         pointer_in_view,
         primary_down,
         primary_pressed,
+        secondary_pressed,
         shift,
         control,
     ) {
-        (true, true, true, _, true) => ViewGesture::Solo,
-        (true, true, _, true, false) => ViewGesture::Orbit,
-        (true, true, _, false, false) => ViewGesture::Paint,
+        (true, _, _, true, _, _) => ViewGesture::Sample,
+        (true, true, true, false, _, true) => ViewGesture::Solo,
+        (true, true, _, false, true, false) => ViewGesture::Orbit,
+        (true, true, _, false, false, false) => ViewGesture::Paint,
         _ => ViewGesture::Idle,
     }
 }
@@ -973,6 +992,7 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
         "Enable a layer to paint.",
         "Brush: primary-button drag",
         "Fill: primary-button click",
+        "Sample: secondary-button click",
         "Orbit: Shift + primary drag",
         "Solo: RightArm (Escape to exit)",
     ]
@@ -1123,6 +1143,33 @@ mod tests {
     }
 
     #[test]
+    fn sampling_copies_exact_rgba_without_changing_the_document() {
+        let texel = Texel::new(8, 8);
+        let sampled = [17, 34, 51, 0];
+        let mut skin = Skin::blank(ModelKind::Classic);
+        skin.set_pixel(texel, sampled);
+        let document = SkinDocument::from_skin(skin, None);
+        let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
+        let original = app.document.skin().clone();
+
+        app.sample_color(ModelHit {
+            part: BodyPart::Head,
+            layer: Layer::Base,
+            face: Face::Front,
+            distance: 1.0,
+            texel,
+        });
+
+        assert_eq!(app.active_color, sampled);
+        assert_eq!(app.hex_color, "#11223300");
+        assert!(!app.hex_color_invalid);
+        assert_eq!(app.document.skin(), &original);
+        assert!(!app.document.is_dirty());
+        assert_eq!(app.document.undo_len(), 0);
+        assert_eq!(app.document.redo_len(), 0);
+    }
+
+    #[test]
     fn brush_controls_cover_every_core_size() {
         assert_eq!(
             [BrushSize::One, BrushSize::Two, BrushSize::Four].map(BrushSize::pixels),
@@ -1176,28 +1223,28 @@ mod tests {
     #[test]
     fn model_view_gestures_separate_paint_orbit_and_outside_input() {
         assert_eq!(
-            view_gesture(true, true, true, false, false),
+            view_gesture(true, true, true, false, false, false),
             ViewGesture::Paint
         );
         assert_eq!(
-            view_gesture(true, true, true, true, false),
+            view_gesture(true, true, true, false, true, false),
             ViewGesture::Orbit
         );
         assert_eq!(
-            view_gesture(false, true, true, false, false),
+            view_gesture(false, true, true, false, false, false),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(false, true, true, true, false),
+            view_gesture(false, true, true, false, true, false),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(true, false, false, true, false),
+            view_gesture(true, false, false, false, true, false),
             ViewGesture::Idle
         );
 
         let drag_transition = [false, false, true, true, false]
-            .map(|shift| view_gesture(true, true, false, shift, false));
+            .map(|shift| view_gesture(true, true, false, false, shift, false));
         assert_eq!(
             drag_transition,
             [
@@ -1213,16 +1260,36 @@ mod tests {
     #[test]
     fn control_press_solos_once_and_consumes_the_held_drag() {
         assert_eq!(
-            view_gesture(true, true, true, false, true),
+            view_gesture(true, true, true, false, false, true),
             ViewGesture::Solo
         );
         assert_eq!(
-            view_gesture(true, true, false, false, true),
+            view_gesture(true, true, false, false, false, true),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(true, true, true, true, true),
+            view_gesture(true, true, true, false, true, true),
             ViewGesture::Solo
+        );
+    }
+
+    #[test]
+    fn secondary_press_samples_once_and_only_inside_the_model_view() {
+        assert_eq!(
+            view_gesture(true, false, false, true, false, false),
+            ViewGesture::Sample
+        );
+        assert_eq!(
+            view_gesture(true, false, false, false, false, false),
+            ViewGesture::Idle
+        );
+        assert_eq!(
+            view_gesture(false, false, false, true, false, false),
+            ViewGesture::Idle
+        );
+        assert_eq!(
+            view_gesture(true, true, true, true, true, true),
+            ViewGesture::Sample
         );
     }
 
