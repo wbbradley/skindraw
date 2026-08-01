@@ -398,3 +398,17 @@ on Ubuntu 22.04 and newer, including the audited Ubuntu 24.04 GNOME/Wayland host
   Rust test suite. The implementation is ready when a manually dispatched workflow produces a
   correctly structured installable artifact; publication and target-machine installation remain
   approval-gated operations.
+
+## Color rendering
+
+Removed directional RGB multipliers from the model geometry so skin texels retain their exact sRGB
+colors on every face instead of rendering darker than palette swatches. Kept the existing sRGB
+texture pipeline, alpha behavior, preview, and solo guides unchanged. Added a regression test for
+neutral face tinting, ran all 48 tests, and visually verified exact white rendering in the native
+app.
+
+### Original task
+
+## Color rendering
+
+Colors in the color palette are brighter than they render on the 3d skin in the drawing area. White from the underlying cuboids appears whiter than a pure white selected pain color, as a comparison.
