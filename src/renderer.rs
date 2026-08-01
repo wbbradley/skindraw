@@ -16,7 +16,9 @@ use crate::{
     skin::{SKIN_HEIGHT, SKIN_WIDTH},
 };
 
-const TARGET_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+// Egui keeps UI colors and its preferred framebuffer in gamma-encoded sRGB values. Keep the model
+// intermediates in that same representation so model texels and color swatches compare exactly.
+const MODEL_COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TextureUpdate {
@@ -117,14 +119,13 @@ impl CallbackTrait for ModelPaintCallback {
 struct Vertex {
     position: [f32; 3],
     uv: [f32; 2],
-    shade: f32,
 }
 
 impl Vertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: size_of::<Self>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32],
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2],
     };
 }
 
@@ -230,7 +231,7 @@ impl ModelRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: TARGET_FORMAT,
+            format: MODEL_COLOR_FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -320,7 +321,7 @@ impl ModelRenderer {
                 module: &model_shader,
                 entry_point: Some("fragment_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: TARGET_FORMAT,
+                    format: MODEL_COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -364,7 +365,7 @@ impl ModelRenderer {
                 module: &preview_shader,
                 entry_point: Some("fragment_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: TARGET_FORMAT,
+                    format: MODEL_COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -407,7 +408,7 @@ impl ModelRenderer {
                 module: &guide_shader,
                 entry_point: Some("fragment_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: TARGET_FORMAT,
+                    format: MODEL_COLOR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -472,7 +473,7 @@ impl ModelRenderer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &composite_shader,
-                entry_point: Some("fragment_main"),
+                entry_point: Some(composite_fragment_entry(surface_format)),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -665,7 +666,7 @@ impl ModelRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: TARGET_FORMAT,
+            format: MODEL_COLOR_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -748,6 +749,16 @@ fn camera_up(camera: Camera) -> Vec3 {
     right.cross(camera.view_direction()).normalize_or_zero()
 }
 
+fn composite_fragment_entry(surface_format: wgpu::TextureFormat) -> &'static str {
+    // An sRGB render target expects linear shader output and applies the transfer function on
+    // write. Egui normally chooses a non-sRGB target, which expects gamma values directly.
+    if surface_format.is_srgb() {
+        "fragment_linear"
+    } else {
+        "fragment_gamma"
+    }
+}
+
 fn model_vertices(
     kind: ModelKind,
     visibility: LayerVisibility,
@@ -775,14 +786,13 @@ fn model_vertices(
                 let y1 = f32::from(region.rect.y + region.rect.height) / SKIN_HEIGHT as f32;
                 let (u0, u1) = if region.flip_u { (x1, x0) } else { (x0, x1) };
                 let (v0, v1) = if region.flip_v { (y1, y0) } else { (y0, y1) };
-                let shade = 1.0;
                 let quad = [
-                    vertex(corners[0], [u0, v0], shade),
-                    vertex(corners[1], [u1, v0], shade),
-                    vertex(corners[2], [u1, v1], shade),
-                    vertex(corners[0], [u0, v0], shade),
-                    vertex(corners[2], [u1, v1], shade),
-                    vertex(corners[3], [u0, v1], shade),
+                    vertex(corners[0], [u0, v0]),
+                    vertex(corners[1], [u1, v0]),
+                    vertex(corners[2], [u1, v1]),
+                    vertex(corners[0], [u0, v0]),
+                    vertex(corners[2], [u1, v1]),
+                    vertex(corners[3], [u0, v1]),
                 ];
                 vertices.extend_from_slice(&quad);
             }
@@ -835,11 +845,10 @@ fn guide_vertices(kind: ModelKind, solo_part: BodyPart) -> Vec<GuideVertex> {
     vertices
 }
 
-fn vertex(position: Vec3, uv: [f32; 2], shade: f32) -> Vertex {
+fn vertex(position: Vec3, uv: [f32; 2]) -> Vertex {
     Vertex {
         position: position.to_array(),
         uv,
-        shade,
     }
 }
 
@@ -971,13 +980,11 @@ struct Scene {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    @location(2) shade: f32,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) shade: f32,
 };
 
 @vertex
@@ -985,7 +992,6 @@ fn vertex_main(input: VertexInput) -> VertexOutput {
     var output: VertexOutput;
     output.position = scene.view_projection * vec4<f32>(input.position, 1.0);
     output.uv = input.uv;
-    output.shade = input.shade;
     return output;
 }
 
@@ -995,7 +1001,7 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if color.a < 0.004 {
         discard;
     }
-    return vec4<f32>(color.rgb * input.shade, color.a);
+    return color;
 }
 "#;
 
@@ -1060,9 +1066,22 @@ fn vertex_main(@builtin(vertex_index) index: u32) -> VertexOutput {
     return output;
 }
 
+fn linear_from_gamma_rgb(srgb: vec3<f32>) -> vec3<f32> {
+    let cutoff = srgb < vec3<f32>(0.04045);
+    let lower = srgb / vec3<f32>(12.92);
+    let higher = pow((srgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    return select(higher, lower, cutoff);
+}
+
 @fragment
-fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
+fn fragment_gamma(input: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(source, source_sampler, input.uv);
+}
+
+@fragment
+fn fragment_linear(input: VertexOutput) -> @location(0) vec4<f32> {
+    let color_gamma = textureSample(source, source_sampler, input.uv);
+    return vec4<f32>(linear_from_gamma_rgb(color_gamma.rgb), color_gamma.a);
 }
 "#;
 
@@ -1070,6 +1089,22 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
 mod tests {
     use super::*;
     use crate::Texel;
+
+    fn linear_from_gamma(value: f32) -> f32 {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn gamma_from_linear(value: f32) -> f32 {
+        if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    }
 
     #[test]
     fn texture_update_is_minimal_bounding_rectangle() {
@@ -1118,10 +1153,41 @@ mod tests {
     }
 
     #[test]
-    fn model_faces_preserve_srgb_skin_colors_without_tinting() {
-        assert_eq!(TARGET_FORMAT, wgpu::TextureFormat::Rgba8UnormSrgb);
-        let vertices = model_vertices(ModelKind::Classic, LayerVisibility::ALL, None);
-        assert!(vertices.iter().all(|vertex| vertex.shade == 1.0));
+    fn model_color_intermediates_preserve_gamma_encoded_skin_bytes() {
+        assert_eq!(MODEL_COLOR_FORMAT, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!(size_of::<Vertex>(), 5 * size_of::<f32>());
+    }
+
+    #[test]
+    fn composite_transfer_matches_egui_for_gamma_and_srgb_framebuffers() {
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ] {
+            assert_eq!(composite_fragment_entry(format), "fragment_gamma");
+        }
+        for format in [
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        ] {
+            assert_eq!(composite_fragment_entry(format), "fragment_linear");
+        }
+
+        for rgb in [
+            [12, 24, 48],
+            [128, 128, 128],
+            [237, 28, 36],
+            [255, 255, 255],
+        ] as [[u8; 3]; 4]
+        {
+            for channel in rgb {
+                let gamma = f32::from(channel) / 255.0;
+                let displayed_on_gamma_surface = gamma;
+                let displayed_on_srgb_surface = gamma_from_linear(linear_from_gamma(gamma));
+                assert!((displayed_on_gamma_surface * 255.0 - f32::from(channel)).abs() <= 0.5);
+                assert!((displayed_on_srgb_surface * 255.0 - f32::from(channel)).abs() <= 0.5);
+            }
+        }
     }
 
     #[test]
