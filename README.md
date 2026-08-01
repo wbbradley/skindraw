@@ -6,8 +6,13 @@ body-part soloing, editable colors, and face-bounded flood fill.
 
 ## Install on Ubuntu
 
-The Linux package supports amd64 Ubuntu 22.04 and newer. Download the `.deb` for the desired version
-from the repository's GitHub Releases page, then install it with APT:
+The Linux package supports amd64 Ubuntu 22.04 and newer. Download the `.deb` from the
+[latest GitHub Release](https://github.com/wbbradley/skindraw/releases/latest), then install it with
+APT. For the initial release:
+
+```bash
+curl -LO https://github.com/wbbradley/skindraw/releases/download/v0.1.0/skindraw_0.1.0-1_amd64.deb
+```
 
 ```bash
 sudo apt install ./skindraw_0.1.0-1_amd64.deb
@@ -50,7 +55,9 @@ gh workflow run release-linux.yml --ref main
 ```
 
 The workflow produces a `skindraw-ubuntu-amd64` artifact containing the `.deb` and its metadata
-report. Workflow artifacts are temporary; tagged packages are attached to GitHub Releases.
+report. This Actions artifact is intended for maintainer testing: GitHub requires the downloader to
+be signed in with repository access, and the artifact expires after 14 days. It is not the public
+installation download.
 
 For a release, first update `version` in `Cargo.toml` and refresh `Cargo.lock`. Commit and push those
 changes, then create and push the exactly matching tag:
@@ -61,7 +68,8 @@ git push origin v0.1.0
 ```
 
 The workflow rejects tags that do not equal `v` followed by the Cargo package version. A successful
-tag build creates or updates the matching GitHub Release and attaches the `.deb`.
+tag build creates or updates the matching GitHub Release and attaches the `.deb`. Release assets are
+the durable, public downloads linked from the installation instructions above.
 
 The initial packaging targets amd64 Ubuntu only. Arm64 packages, Flatpak, Snap, a PPA, and automatic
 client updates are not currently provided.
