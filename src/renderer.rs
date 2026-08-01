@@ -775,12 +775,7 @@ fn model_vertices(
                 let y1 = f32::from(region.rect.y + region.rect.height) / SKIN_HEIGHT as f32;
                 let (u0, u1) = if region.flip_u { (x1, x0) } else { (x0, x1) };
                 let (v0, v1) = if region.flip_v { (y1, y0) } else { (y0, y1) };
-                let shade = match face {
-                    Face::Top => 1.0,
-                    Face::Front | Face::Left => 0.88,
-                    Face::Back | Face::Right => 0.72,
-                    Face::Bottom => 0.58,
-                };
+                let shade = 1.0;
                 let quad = [
                     vertex(corners[0], [u0, v0], shade),
                     vertex(corners[1], [u1, v0], shade),
@@ -1120,6 +1115,13 @@ mod tests {
             Some(BodyPart::RightArm),
         );
         assert_eq!(solo.len(), 2 * 6 * 6);
+    }
+
+    #[test]
+    fn model_faces_preserve_srgb_skin_colors_without_tinting() {
+        assert_eq!(TARGET_FORMAT, wgpu::TextureFormat::Rgba8UnormSrgb);
+        let vertices = model_vertices(ModelKind::Classic, LayerVisibility::ALL, None);
+        assert!(vertices.iter().all(|vertex| vertex.shade == 1.0));
     }
 
     #[test]
