@@ -471,3 +471,281 @@ model than the same RGBA value in the palette and active-color swatch.
   composite correctly over the base layer; they are context-dependent and are not expected to
   match an isolated swatch.
 - Run `cargo fmt --check`, warnings-denied Clippy, and the full test suite.
+
+
+## Orbit by dragging empty model-view space
+
+Implemented drag-origin-aware viewport gestures: a primary drag that begins off the character now orbits, while drags that begin on the character retain paint behavior. Shift-drag orbit and Ctrl-click solo behavior remain intact, with focused gesture regressions.
+
+### Original task
+
+## Rotations when clicking in the dead space
+
+Let's make it so that clicking and dragging off the character, causes orbit rotations, instead of
+just doing nothing.
+
+
+## Prevent macOS file-dialog drag/drop reentrancy crashes
+
+Replaced blocking Open and Save As dialogs with asynchronous native sheets so file-panel drag/drop no longer nests a macOS event loop inside winit. Preserved dirty-document confirmations and deferred actions across saves, including cancellation and error paths, and added regressions for open and save-dialog completion.
+
+### Original task
+
+## Fix file open dragging bug
+
+When dragging .png from another folder into the file open dialog I saw a crash. Standard macOS behavior is to navigate the open dialog to that location. This crash occurred when I dropped a file on the dialog, I think.
+
+
+~/src/skindraw$ cargo run
+   Compiling skindraw v0.1.0 (/Users/wbbradley/src/skindraw)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.67s
+     Running `target/debug/skindraw`
+
+thread 'main' (10369477) panicked at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_handler.rs:135:17:
+tried to handle event while another event is currently being handled
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'main' (10369477) panicked at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:225:5:
+panic in a function that cannot unwind
+stack backtrace:
+   0:        0x103728d7c - std[7d7552da0923e8b2]::backtrace_rs::backtrace::libunwind::trace
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/../../backtrace/src/backtrace/libunwind.rs:117:9
+   1:        0x103728d7c - std[7d7552da0923e8b2]::backtrace_rs::backtrace::trace_unsynchronized::<std[7d7552da0923e8b2]::sys::backtrace::_print_fmt::{closure#1}>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/../../backtrace/src/backtrace/mod.rs:66:14
+   2:        0x103728d7c - std[7d7552da0923e8b2]::sys::backtrace::_print_fmt
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/sys/backtrace.rs:74:9
+   3:        0x103728d7c - <<std[7d7552da0923e8b2]::sys::backtrace::BacktraceLock>::print::DisplayBacktrace as core[4b39a0a778b8475a]::fmt::Display>::fmt
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/sys/backtrace.rs:44:26
+   4:        0x10373c080 - <core[4b39a0a778b8475a]::fmt::rt::Argument>::fmt
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/fmt/rt.rs:152:76
+   5:        0x10373c080 - core[4b39a0a778b8475a]::fmt::write
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/fmt/mod.rs:1687:22
+   6:        0x10372cc80 - std[7d7552da0923e8b2]::io::default_write_fmt::<std[7d7552da0923e8b2]::sys::stdio::unix::Stderr>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/io/mod.rs:621:11
+   7:        0x10372cc80 - <std[7d7552da0923e8b2]::sys::stdio::unix::Stderr as std[7d7552da0923e8b2]::io::Write>::write_fmt
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/io/mod.rs:1976:13
+   8:        0x1037149b4 - <std[7d7552da0923e8b2]::sys::backtrace::BacktraceLock>::print
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/sys/backtrace.rs:47:25
+   9:        0x1037149b4 - std[7d7552da0923e8b2]::panicking::default_hook::{closure#0}
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:292:27
+  10:        0x10372309c - std[7d7552da0923e8b2]::panicking::default_hook
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:319:9
+  11:        0x1037233c4 - std[7d7552da0923e8b2]::panicking::panic_with_hook
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:825:13
+  12:        0x103714a8c - std[7d7552da0923e8b2]::panicking::panic_handler::{closure#0}
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:691:13
+  13:        0x103709d64 - std[7d7552da0923e8b2]::sys::backtrace::__rust_end_short_backtrace::<std[7d7552da0923e8b2]::panicking::panic_handler::{closure#0}, !>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/sys/backtrace.rs:182:18
+  14:        0x103715294 - __rustc[8068f81614cfe5c]::rust_begin_unwind
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:689:5
+  15:        0x1037b2f68 - core[4b39a0a778b8475a]::panicking::panic_nounwind_fmt::runtime
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:122:22
+  16:        0x1037b2f68 - core[4b39a0a778b8475a]::panicking::panic_nounwind_fmt
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/intrinsics/mod.rs:2448:9
+  17:        0x1037b2ef0 - core[4b39a0a778b8475a]::panicking::panic_nounwind
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:225:5
+  18:        0x1037b3044 - core[4b39a0a778b8475a]::panicking::panic_cannot_unwind
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/panicking.rs:337:5
+  19:        0x10286929c - <Closure as block2::traits::IntoBlock<(),R>>::__get_invoke_stack_block::invoke::h57a5880509d47996
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/block2-0.5.1/src/traits.rs:103:17
+  20:        0x18105ead0 - <unknown>
+  21:        0x18105ea10 - <unknown>
+  22:        0x18105d844 - <unknown>
+  23:        0x1811301c4 - <unknown>
+  24:        0x1828a7b44 - <unknown>
+  25:        0x18291bbec - <unknown>
+  26:        0x18570b188 - <unknown>
+  27:        0x188649ed0 - <unknown>
+  28:        0x1886502ac - <unknown>
+  29:        0x1810f38b0 - <unknown>
+  30:        0x18105f4a8 - <unknown>
+  31:        0x18105f3d0 - <unknown>
+  32:        0x18105dd98 - <unknown>
+  33:        0x1811301c4 - <unknown>
+  34:        0x18de43560 - <unknown>
+  35:        0x18de468bc - <unknown>
+  36:        0x18dfd014c - <unknown>
+  37:        0x185b3835c - <unknown>
+  38:        0x18548c084 - <unknown>
+  39:        0x1860218b0 - <unknown>
+  40:        0x1860215bc - <unknown>
+  41:        0x1856b4324 - <unknown>
+  42:        0x1856b2f4c - <unknown>
+  43:        0x1856b2ef8 - <unknown>
+  44:        0x1856b27c4 - <unknown>
+  45:        0x1856b267c - <unknown>
+  46:        0x186389b14 - <unknown>
+  47:        0x102f17164 - <() as objc2::encode::EncodeArguments>::__invoke::hc956a246ee58a42f
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/encode.rs:433:26
+  48:        0x102f18e10 - objc2::runtime::message_receiver::msg_send_primitive::send::hf27c0d25d4e7f7b0
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/runtime/message_receiver.rs:172:18
+  49:        0x102f13c20 - objc2::runtime::message_receiver::MessageReceiver::send_message::h29c43a7ab2f48cf3
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/runtime/message_receiver.rs:432:38
+  50:        0x102810c1c - <MethodFamily as objc2::__macro_helpers::msg_send_retained::MsgSend<Receiver,Return>>::send_message::h1b25bd3eef418fd0
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/__macro_helpers/msg_send_retained.rs:35:28
+  51:        0x10281977c - objc2_app_kit::generated::__NSSavePanel::NSSavePanel::runModal::h43dd408ae09d38d5
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/macros/extern_methods.rs:266:14
+  52:        0x102586a44 - rfd::backend::macos::file_dialog::panel_ffi::Panel::run_modal::h3e20e581d257df6a
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/backend/macos/file_dialog/panel_ffi.rs:76:29
+  53:        0x102588c4c - rfd::backend::macos::file_dialog::<impl rfd::backend::FilePickerDialogImpl for rfd::file_dialog::FileDialog>::pick_file::{{closure}}::{{closure}}::hd737df70bd0bbb09
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/backend/macos/file_dialog.rs:24:26
+  54:        0x102588ef8 - rfd::backend::macos::utils::run_on_main::h476216c1773d6138
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/backend/macos/utils.rs:22:9
+  55:        0x102588bfc - rfd::backend::macos::file_dialog::<impl rfd::backend::FilePickerDialogImpl for rfd::file_dialog::FileDialog>::pick_file::{{closure}}::hc32aa9fe685a59a1
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/backend/macos/file_dialog.rs:21:13
+  56:        0x10258acc8 - objc2::rc::autorelease::autoreleasepool::hfd6198412ba95279
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.6.4/src/rc/autorelease.rs:453:15
+  57:        0x10258616c - rfd::backend::macos::file_dialog::<impl rfd::backend::FilePickerDialogImpl for rfd::file_dialog::FileDialog>::pick_file::hcf430774510a2709
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/backend/macos/file_dialog.rs:20:9
+  58:        0x1025860ac - rfd::file_dialog::FileDialog::pick_file::h5ab5d407ce837689
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rfd-0.17.2/src/file_dialog.rs:123:9
+  59:        0x10257968c - skindraw::app::SkinDrawApp::open::h528beee5005e69eb
+                               at /Users/wbbradley/src/skindraw/src/app.rs:676:79
+  60:        0x102578ae8 - skindraw::app::SkinDrawApp::execute_action::h2a9218e5144dd4c6
+                               at /Users/wbbradley/src/skindraw/src/app.rs:658:42
+  61:        0x102578bbc - skindraw::app::SkinDrawApp::request_action::h75e8e88a7382f4d1
+                               at /Users/wbbradley/src/skindraw/src/app.rs:648:18
+  62:        0x10257a518 - skindraw::app::SkinDrawApp::toolbar::h534118dad9b4588a
+                               at /Users/wbbradley/src/skindraw/src/app.rs:206:18
+  63:        0x102577a24 - <skindraw::app::SkinDrawApp as eframe::epi::App>::ui::h86a996264a125e30
+                               at /Users/wbbradley/src/skindraw/src/app.rs:815:14
+  64:        0x1025e3268 - eframe::native::epi_integration::EpiIntegration::update::{{closure}}::he0da23d6958dd740
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/epi_integration.rs:295:29
+  65:        0x102f9592c - egui::context::Context::run_ui_dyn::{{closure}}::h7f902f2698bf3075
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:798:17
+  66:        0x102fba950 - egui::context::Context::run_dyn::he94a6ebb81498f40
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:842:13
+  67:        0x102f95718 - egui::context::Context::run_ui_dyn::ha215e55bb9e43027
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:787:14
+  68:        0x1025bfb58 - egui::context::Context::run_ui::hab16e4f61524513d
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/egui-0.35.0/src/context.rs:781:14
+  69:        0x1025e2db4 - eframe::native::epi_integration::EpiIntegration::update::h571ff981371caf6f
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/epi_integration.rs:279:41
+  70:        0x1025cca30 - eframe::native::wgpu_integration::WgpuWinitRunning::run_ui_and_paint::h27b0c04a1d9c1259
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/wgpu_integration.rs:680:25
+  71:        0x1025c8018 - <eframe::native::wgpu_integration::WgpuWinitApp as eframe::native::winit_integration::WinitApp>::run_ui_and_paint::h713513d40491c6ad
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/wgpu_integration.rs:416:21
+  72:        0x1025df810 - <eframe::native::run::WinitAppWrapper<T> as winit::application::ApplicationHandler<eframe::native::winit_integration::UserEvent>>::window_event::{{closure}}::hd707abff20f3e9ca
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:363:36
+  73:        0x1025de4f8 - eframe::native::event_loop_context::with_event_loop_context::ha42615f1891181d2
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/event_loop_context.rs:53:5
+  74:        0x1025df7a0 - <eframe::native::run::WinitAppWrapper<T> as winit::application::ApplicationHandler<eframe::native::winit_integration::UserEvent>>::window_event::h965d42528f467966
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:360:9
+  75:        0x1025e1be0 - winit::event_loop::dispatch_event_for_app::h316e694af159bda2
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/event_loop.rs:642:56
+  76:        0x1025e1be0 - winit::platform::run_on_demand::EventLoopExtRunOnDemand::run_app_on_demand::{{closure}}::hf4ab17cc2bbdb862
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform/run_on_demand.rs:76:13
+  77:        0x1025c4f98 - winit::platform_impl::macos::event_loop::map_user_event::{{closure}}::h74c63353bfa7c978
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_loop.rs:174:22
+  78:        0x102870c44 - <alloc::boxed::Box<F,A> as core::ops::function::FnMut<Args>>::call_mut::hbce68319d5eef658
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/alloc/src/boxed.rs:2256:9
+  79:        0x10287581c - winit::platform_impl::macos::event_handler::EventHandler::handle_event::h82b070d885832aeb
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_handler.rs:125:17
+  80:        0x102898b20 - winit::platform_impl::macos::app_state::ApplicationDelegate::handle_event::h3f73bb0d3d195347
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/app_state.rs:324:36
+  81:        0x10289a930 - winit::platform_impl::macos::app_state::ApplicationDelegate::cleared::h2f2e772a9d15588b
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/app_state.rs:386:18
+  82:        0x1028884d0 - winit::platform_impl::macos::observer::control_flow_end_handler::{{closure}}::h959e20e686e2047b
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/observer.rs:84:80
+  83:        0x102888330 - winit::platform_impl::macos::observer::control_flow_handler::{{closure}}::h80d7e149cc8aae79
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/observer.rs:46:9
+  84:        0x102857c24 - std::panicking::catch_unwind::do_call::hdc9824567d55b879
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:581:40
+  85:        0x102878f68 - ___rust_try
+  86:        0x1028740e0 - std::panicking::catch_unwind::h01a200bd1ec0ed66
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panicking.rs:544:19
+  87:        0x1028740e0 - std::panic::catch_unwind::h844f05abdef8235a
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/panic.rs:359:14
+  88:        0x102895b70 - winit::platform_impl::macos::event_loop::stop_app_on_panic::hf25ad34c60d4a6a2
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_loop.rs:444:11
+  89:        0x102888144 - winit::platform_impl::macos::observer::control_flow_handler::h7e96b6cb799b5622
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/observer.rs:44:5
+  90:        0x1028883a4 - winit::platform_impl::macos::observer::control_flow_end_handler::he3531071011d25cd
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/observer.rs:79:9
+  91:        0x18105e314 - <unknown>
+  92:        0x18105e210 - <unknown>
+  93:        0x18105d8bc - <unknown>
+  94:        0x1811301c4 - <unknown>
+  95:        0x18de43560 - <unknown>
+  96:        0x18de468bc - <unknown>
+  97:        0x18dfd014c - <unknown>
+  98:        0x185b3835c - <unknown>
+  99:        0x18548c084 - <unknown>
+ 100:        0x1860218b0 - <unknown>
+ 101:        0x1860215bc - <unknown>
+ 102:        0x18547f13c - <unknown>
+ 103:        0x1028d7098 - <() as objc2::encode::EncodeArguments>::__invoke::hbf1ced3cd8c99e5f
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/encode.rs:437:26
+ 104:        0x1028d8284 - objc2::runtime::message_receiver::msg_send_primitive::send::hd18476ad928983db
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/runtime/message_receiver.rs:173:18
+ 105:        0x1028ce5f4 - objc2::runtime::message_receiver::MessageReceiver::send_message::h08f6d660dbb42ed5
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/runtime/message_receiver.rs:433:38
+ 106:        0x1028c3d00 - objc2::__macro_helpers::msg_send::MsgSend::send_message::h55f9d9625e3868c2
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/__macro_helpers/msg_send.rs:27:31
+ 107:        0x1028c3324 - objc2_app_kit::generated::__NSApplication::NSApplication::run::h066a24ac0b9ec049
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/macros/extern_methods.rs:247:14
+ 108:        0x1025c580c - winit::platform_impl::macos::event_loop::EventLoop<T>::run_on_demand::{{closure}}::{{closure}}::h779e259732b63572
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_loop.rs:299:35
+ 109:        0x1025bfd20 - objc2::rc::autorelease::autoreleasepool::h078e0ee02844783c
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/objc2-0.5.2/src/rc/autorelease.rs:438:15
+ 110:        0x1025c55c0 - winit::platform_impl::macos::event_loop::EventLoop<T>::run_on_demand::{{closure}}::h73550740fe8abaa5
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_loop.rs:285:13
+ 111:        0x1025c61d8 - winit::platform_impl::macos::event_handler::EventHandler::set::h2c57085a16fbfe32
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_handler.rs:98:9
+ 112:        0x1025c1fbc - winit::platform_impl::macos::app_state::ApplicationDelegate::set_event_handler::h4e0794702d866066
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/app_state.rs:193:36
+ 113:        0x1025c541c - winit::platform_impl::macos::event_loop::EventLoop<T>::run_on_demand::h0ecdd39268a75e60
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform_impl/macos/event_loop.rs:284:23
+ 114:        0x1025def6c - <winit::event_loop::EventLoop<T> as winit::platform::run_on_demand::EventLoopExtRunOnDemand>::run_on_demand::h806ff24e14541d12
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform/run_on_demand.rs:89:25
+ 115:        0x1025e1a58 - winit::platform::run_on_demand::EventLoopExtRunOnDemand::run_app_on_demand::h0388a14c1f0e8e38
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/winit-0.30.13/src/platform/run_on_demand.rs:75:14
+ 116:        0x1025e4254 - eframe::native::run::run_and_return::ha3751d72b8a09f75
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:380:16
+ 117:        0x1025e6578 - eframe::native::run::run_wgpu::{{closure}}::h4d055ce7b7535ef4
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:451:13
+ 118:        0x1025e46b8 - eframe::native::run::with_event_loop::{{closure}}::h59abf388680cb9c0
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:73:12
+ 119:        0x1025b866c - std::thread::local::LocalKey<T>::try_with::h38ef429e1de215c4
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/local.rs:462:12
+ 120:        0x1025b8170 - std::thread::local::LocalKey<T>::with::h7f74d2eb904f174f
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/local.rs:426:20
+ 121:        0x1025e4540 - eframe::native::run::with_event_loop::h34d91dcc36eabdfb
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:63:16
+ 122:        0x1025e61d0 - eframe::native::run::run_wgpu::hf7f62a98e6ced7b7
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/native/run.rs:448:16
+ 123:        0x1025e20e0 - eframe::run_native_ext::hd7ab2f67a35468c2
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/lib.rs:324:13
+ 124:        0x1025e1e20 - eframe::run_native::h9e9f5d02caf334ee
+                               at /Users/wbbradley/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/eframe-0.35.0/src/lib.rs:293:5
+ 125:        0x102540fc4 - skindraw::main::hc4b85ce8c9cd4e31
+                               at /Users/wbbradley/src/skindraw/src/main.rs:6:5
+ 126:        0x102541098 - core::ops::function::FnOnce::call_once::h4e129bc1ce279a69
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/ops/function.rs:250:5
+ 127:        0x102540d94 - std::sys::backtrace::__rust_begin_short_backtrace::h4d2203f691605bcf
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/sys/backtrace.rs:166:18
+ 128:        0x10254193c - std::rt::lang_start::{{closure}}::h56c39411ff7a8310
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:206:18
+ 129:        0x103722644 - <&dyn core[4b39a0a778b8475a]::ops::function::Fn<(), Output = i32> + core[4b39a0a778b8475a]::marker::Sync + core[4b39a0a778b8475a]::panic::unwind_safe::RefUnwindSafe as core[4b39a0a778b8475a]::ops::function::FnOnce<()>>::call_once
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/core/src/ops/function.rs:287:21
+ 130:        0x103722644 - std[7d7552da0923e8b2]::panicking::catch_unwind::do_call::<&dyn core[4b39a0a778b8475a]::ops::function::Fn<(), Output = i32> + core[4b39a0a778b8475a]::marker::Sync + core[4b39a0a778b8475a]::panic::unwind_safe::RefUnwindSafe, i32>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:581:40
+ 131:        0x103722644 - std[7d7552da0923e8b2]::panicking::catch_unwind::<i32, &dyn core[4b39a0a778b8475a]::ops::function::Fn<(), Output = i32> + core[4b39a0a778b8475a]::marker::Sync + core[4b39a0a778b8475a]::panic::unwind_safe::RefUnwindSafe>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:544:19
+ 132:        0x103722644 - std[7d7552da0923e8b2]::panic::catch_unwind::<&dyn core[4b39a0a778b8475a]::ops::function::Fn<(), Output = i32> + core[4b39a0a778b8475a]::marker::Sync + core[4b39a0a778b8475a]::panic::unwind_safe::RefUnwindSafe, i32>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panic.rs:359:14
+ 133:        0x103722644 - std[7d7552da0923e8b2]::rt::lang_start_internal::{closure#0}
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/rt.rs:175:24
+ 134:        0x103722644 - std[7d7552da0923e8b2]::panicking::catch_unwind::do_call::<std[7d7552da0923e8b2]::rt::lang_start_internal::{closure#0}, isize>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:581:40
+ 135:        0x103722644 - std[7d7552da0923e8b2]::panicking::catch_unwind::<isize, std[7d7552da0923e8b2]::rt::lang_start_internal::{closure#0}>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panicking.rs:544:19
+ 136:        0x103722644 - std[7d7552da0923e8b2]::panic::catch_unwind::<std[7d7552da0923e8b2]::rt::lang_start_internal::{closure#0}, isize>
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/panic.rs:359:14
+ 137:        0x103722644 - std[7d7552da0923e8b2]::rt::lang_start_internal
+                               at /rustc/ac68faa20c58cbccd01ee7208bf3b6e93a7d7f96/library/std/src/rt.rs:171:5
+ 138:        0x10254190c - std::rt::lang_start::hc98ec76e292e80c8
+                               at /Users/wbbradley/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/rt.rs:205:5
+ 139:        0x10254102c - _main
+thread caused non-unwinding panic. aborting.
+Abort trap: 6              cargo run
