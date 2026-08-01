@@ -1,7 +1,13 @@
 use std::{
-    fs, io,
+    fs,
+    future::Future,
+    io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    thread,
 };
 
 use eframe::egui::{
@@ -68,12 +74,31 @@ enum ConfirmationChoice {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileDialogPurpose {
+    Open,
+    Save { after_save: Option<DocumentAction> },
+}
+
+struct PendingFileDialog {
+    purpose: FileDialogPurpose,
+    receiver: Receiver<Option<PathBuf>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewGesture {
     Idle,
     Paint,
     Orbit,
     Solo,
     Sample,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrimaryDrag {
+    Idle,
+    Paint,
+    Orbit,
+    SoloConsumed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -107,10 +132,12 @@ pub struct SkinDrawApp {
     hex_color: String,
     hex_color_invalid: bool,
     active_stroke: Option<StrokeBuilder>,
+    primary_drag: PrimaryDrag,
     hovered_hit: Option<ModelHit>,
     solo_part: Option<BodyPart>,
     uploaded_skin: Skin,
     pending_action: Option<DocumentAction>,
+    pending_file_dialog: Option<PendingFileDialog>,
     error_message: Option<String>,
     status_message: Option<String>,
     allow_close: bool,
@@ -150,9 +177,11 @@ impl SkinDrawApp {
             hex_color: format_hex_color([237, 28, 36, 255]),
             hex_color_invalid: false,
             active_stroke: None,
+            primary_drag: PrimaryDrag::Idle,
             hovered_hit: None,
             solo_part: None,
             pending_action: None,
+            pending_file_dialog: None,
             error_message: None,
             status_message: None,
             allow_close: false,
@@ -205,9 +234,9 @@ impl SkinDrawApp {
         if let Some(action) = requested_action {
             self.request_action(action, ctx);
         } else if save_as {
-            self.save_as();
+            self.save_as(ctx);
         } else if save {
-            self.save();
+            self.save(ctx);
         }
     }
 
@@ -352,7 +381,7 @@ impl SkinDrawApp {
                         ui.label("Brush: primary-button drag");
                         ui.label("Fill: primary-button click");
                         ui.label("Sample: secondary-button click");
-                        ui.label("Orbit: Shift + primary drag");
+                        ui.label("Orbit: drag empty space or Shift + primary drag");
                         if let Some(part) = self.solo_part {
                             ui.label(format!("Solo: {part:?} (Escape to exit)"));
                         } else {
@@ -397,13 +426,18 @@ impl SkinDrawApp {
             .or_else(|| response.hover_pos());
         self.hovered_hit = pointer.and_then(|position| self.hit_at(rect, position));
 
+        if primary_pressed {
+            self.primary_drag =
+                begin_primary_drag(pointer_in_view, self.hovered_hit.is_some(), shift, control);
+        }
+
         let gesture = view_gesture(
             pointer_in_view,
             primary_down,
             primary_pressed,
             secondary_pressed,
             shift,
-            control,
+            self.primary_drag,
         );
         match gesture {
             ViewGesture::Orbit => {
@@ -450,6 +484,7 @@ impl SkinDrawApp {
         }
         if primary_released {
             self.finish_stroke();
+            self.primary_drag = PrimaryDrag::Idle;
         }
 
         let texture_update = TextureUpdate::between(&self.uploaded_skin, self.document.skin());
@@ -480,7 +515,9 @@ impl SkinDrawApp {
             .paint_callback(),
         );
 
-        if shift && response.hovered() {
+        if gesture == ViewGesture::Orbit {
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.hovered() && (shift || self.hovered_hit.is_none()) {
             ctx.set_cursor_icon(egui::CursorIcon::Grab);
         } else if self.hovered_hit.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -622,9 +659,9 @@ impl SkinDrawApp {
             self.set_tool(tool);
         }
         if consume(ctx, SAVE_AS_SHORTCUT) {
-            self.save_as();
+            self.save_as(ctx);
         } else if consume(ctx, SAVE_SHORTCUT) {
-            self.save();
+            self.save(ctx);
         } else if consume(ctx, OPEN_SHORTCUT) {
             self.request_action(DocumentAction::Open, ctx);
         } else if consume(ctx, NEW_SHORTCUT) {
@@ -655,7 +692,7 @@ impl SkinDrawApp {
                 self.replace_document(SkinDocument::new(kind), kind);
                 self.status_message = Some(format!("Created a new {kind:?} skin."));
             }
-            DocumentAction::Open => self.open(),
+            DocumentAction::Open => self.open(ctx),
             DocumentAction::Quit => {
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -672,11 +709,15 @@ impl SkinDrawApp {
         self.status_message = None;
     }
 
-    fn open(&mut self) {
-        let Some(path) = file_dialog(self.document.path().map(PathBuf::from)).pick_file() else {
+    fn open(&mut self, ctx: &egui::Context) {
+        if self.pending_file_dialog.is_some() {
             return;
-        };
-        self.open_path(path);
+        }
+        let dialog = async_file_dialog(self.document.path().map(PathBuf::from));
+        self.pending_file_dialog = Some(PendingFileDialog {
+            purpose: FileDialogPurpose::Open,
+            receiver: spawn_file_dialog(dialog.pick_file(), ctx),
+        });
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -692,19 +733,26 @@ impl SkinDrawApp {
         }
     }
 
-    fn save(&mut self) -> bool {
+    fn save(&mut self, ctx: &egui::Context) {
         self.finish_stroke();
         if let Some(path) = self.document.path().map(PathBuf::from) {
-            self.save_to(path)
+            self.save_to(path);
         } else {
-            self.save_as()
+            self.save_as(ctx);
         }
     }
 
-    fn save_as(&mut self) -> bool {
+    fn save_as(&mut self, ctx: &egui::Context) {
+        self.begin_save_as(ctx, None);
+    }
+
+    fn begin_save_as(&mut self, ctx: &egui::Context, after_save: Option<DocumentAction>) {
         self.finish_stroke();
+        if self.pending_file_dialog.is_some() {
+            return;
+        }
         let current = self.document.path().map(PathBuf::from);
-        let mut dialog = file_dialog(current.clone());
+        let mut dialog = async_file_dialog(current.clone());
         dialog = dialog.set_file_name(
             current
                 .as_deref()
@@ -712,10 +760,10 @@ impl SkinDrawApp {
                 .and_then(|name| name.to_str())
                 .unwrap_or("skin.png"),
         );
-        let Some(path) = dialog.save_file() else {
-            return false;
-        };
-        self.save_to(ensure_png_extension(path))
+        self.pending_file_dialog = Some(PendingFileDialog {
+            purpose: FileDialogPurpose::Save { after_save },
+            receiver: spawn_file_dialog(dialog.save_file(), ctx),
+        });
     }
 
     fn save_to(&mut self, path: PathBuf) -> bool {
@@ -729,6 +777,53 @@ impl SkinDrawApp {
                     Some(format!("Could not save {}:\n{error}", display_path(&path)));
                 false
             }
+        }
+    }
+
+    fn poll_file_dialog(&mut self, ctx: &egui::Context) {
+        let Some(dialog) = self.pending_file_dialog.as_ref() else {
+            return;
+        };
+        let result = match dialog.receiver.try_recv() {
+            Ok(path) => path,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => None,
+        };
+        let purpose = self
+            .pending_file_dialog
+            .take()
+            .expect("polled file dialog exists")
+            .purpose;
+        match (purpose, result) {
+            (FileDialogPurpose::Open, Some(path)) => self.open_path(path),
+            (FileDialogPurpose::Open, None) => {}
+            (FileDialogPurpose::Save { after_save }, Some(path)) => {
+                let saved = self.save_to(ensure_png_extension(path));
+                if let Some(action) = after_save {
+                    if saved {
+                        self.execute_action(action, ctx);
+                    } else {
+                        self.pending_action = Some(action);
+                    }
+                }
+            }
+            (FileDialogPurpose::Save { after_save }, None) => {
+                self.pending_action = after_save;
+            }
+        }
+    }
+
+    fn confirm_save(&mut self, action: DocumentAction, ctx: &egui::Context) {
+        self.pending_action = None;
+        self.finish_stroke();
+        if let Some(path) = self.document.path().map(PathBuf::from) {
+            if self.save_to(path) {
+                self.execute_action(action, ctx);
+            } else {
+                self.pending_action = Some(action);
+            }
+        } else {
+            self.begin_save_as(ctx, Some(action));
         }
     }
 
@@ -775,16 +870,12 @@ impl SkinDrawApp {
                 });
             if let Some(choice) = choice {
                 match choice {
-                    ConfirmationChoice::Save if self.save() => {
-                        self.pending_action = None;
-                        self.execute_action(action, ctx);
-                    }
+                    ConfirmationChoice::Save => self.confirm_save(action, ctx),
                     ConfirmationChoice::Discard => {
                         self.pending_action = None;
                         self.execute_action(action, ctx);
                     }
                     ConfirmationChoice::Cancel => self.pending_action = None,
-                    ConfirmationChoice::Save => {}
                 }
             }
         }
@@ -810,6 +901,7 @@ impl SkinDrawApp {
 impl eframe::App for SkinDrawApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.poll_file_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.shortcuts(&ctx);
         self.toolbar(ui, &ctx);
@@ -843,21 +935,37 @@ fn view_gesture(
     primary_pressed: bool,
     secondary_pressed: bool,
     shift: bool,
-    control: bool,
+    primary_drag: PrimaryDrag,
 ) -> ViewGesture {
     match (
         pointer_in_view,
         primary_down,
         primary_pressed,
         secondary_pressed,
-        shift,
-        control,
     ) {
-        (true, _, _, true, _, _) => ViewGesture::Sample,
-        (true, true, true, false, _, true) => ViewGesture::Solo,
-        (true, true, _, false, true, false) => ViewGesture::Orbit,
-        (true, true, _, false, false, false) => ViewGesture::Paint,
+        (true, _, _, true) => ViewGesture::Sample,
+        (true, true, true, false) if primary_drag == PrimaryDrag::SoloConsumed => ViewGesture::Solo,
+        (true, true, _, false) if primary_drag == PrimaryDrag::Orbit => ViewGesture::Orbit,
+        (true, true, _, false) if primary_drag == PrimaryDrag::Paint && shift => ViewGesture::Orbit,
+        (true, true, _, false) if primary_drag == PrimaryDrag::Paint => ViewGesture::Paint,
         _ => ViewGesture::Idle,
+    }
+}
+
+fn begin_primary_drag(
+    pointer_in_view: bool,
+    pointer_on_model: bool,
+    shift: bool,
+    control: bool,
+) -> PrimaryDrag {
+    if !pointer_in_view {
+        PrimaryDrag::Idle
+    } else if control {
+        PrimaryDrag::SoloConsumed
+    } else if shift || !pointer_on_model {
+        PrimaryDrag::Orbit
+    } else {
+        PrimaryDrag::Paint
     }
 }
 
@@ -960,14 +1068,28 @@ fn save_palette(path: &Path, palette: [[u8; 4]; 16]) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-fn file_dialog(current: Option<PathBuf>) -> rfd::FileDialog {
-    let mut dialog = rfd::FileDialog::new().add_filter("Minecraft skin PNG", &["png"]);
+fn async_file_dialog(current: Option<PathBuf>) -> rfd::AsyncFileDialog {
+    let mut dialog = rfd::AsyncFileDialog::new().add_filter("Minecraft skin PNG", &["png"]);
     if let Some(path) = current
         && let Some(directory) = path.parent()
     {
         dialog = dialog.set_directory(directory);
     }
     dialog
+}
+
+fn spawn_file_dialog<F>(future: F, ctx: &egui::Context) -> Receiver<Option<PathBuf>>
+where
+    F: Future<Output = Option<rfd::FileHandle>> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    let ctx = ctx.clone();
+    thread::spawn(move || {
+        let path = pollster::block_on(future).map(|file| file.path().to_path_buf());
+        let _ = sender.send(path);
+        ctx.request_repaint();
+    });
+    receiver
 }
 
 fn ensure_png_extension(mut path: PathBuf) -> PathBuf {
@@ -993,7 +1115,7 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
         "Brush: primary-button drag",
         "Fill: primary-button click",
         "Sample: secondary-button click",
-        "Orbit: Shift + primary drag",
+        "Orbit: drag empty space or Shift + primary drag",
         "Solo: RightArm (Escape to exit)",
     ]
     .into_iter()
@@ -1045,6 +1167,19 @@ mod tests {
         );
         assert!(document.commit_stroke(stroke));
         SkinDrawApp::from_document(document, ModelKind::Classic)
+    }
+
+    fn complete_file_dialog(
+        app: &mut SkinDrawApp,
+        purpose: FileDialogPurpose,
+        result: Option<PathBuf>,
+        ctx: &egui::Context,
+    ) {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(result).unwrap();
+        app.pending_file_dialog = Some(PendingFileDialog { purpose, receiver });
+        app.poll_file_dialog(ctx);
+        assert!(app.pending_file_dialog.is_none());
     }
 
     #[test]
@@ -1222,29 +1357,33 @@ mod tests {
 
     #[test]
     fn model_view_gestures_separate_paint_orbit_and_outside_input() {
+        let paint = begin_primary_drag(true, true, false, false);
+        let orbit = begin_primary_drag(true, false, false, false);
+        assert_eq!(paint, PrimaryDrag::Paint);
+        assert_eq!(orbit, PrimaryDrag::Orbit);
         assert_eq!(
-            view_gesture(true, true, true, false, false, false),
+            begin_primary_drag(false, false, false, false),
+            PrimaryDrag::Idle
+        );
+        assert_eq!(
+            view_gesture(true, true, true, false, false, paint),
             ViewGesture::Paint
         );
         assert_eq!(
-            view_gesture(true, true, true, false, true, false),
+            view_gesture(true, true, true, false, false, orbit),
             ViewGesture::Orbit
         );
         assert_eq!(
-            view_gesture(false, true, true, false, false, false),
+            view_gesture(false, true, true, false, false, orbit),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(false, true, true, false, true, false),
-            ViewGesture::Idle
-        );
-        assert_eq!(
-            view_gesture(true, false, false, false, true, false),
+            view_gesture(true, false, false, false, true, paint),
             ViewGesture::Idle
         );
 
         let drag_transition = [false, false, true, true, false]
-            .map(|shift| view_gesture(true, true, false, false, shift, false));
+            .map(|shift| view_gesture(true, true, false, false, shift, paint));
         assert_eq!(
             drag_transition,
             [
@@ -1255,40 +1394,47 @@ mod tests {
                 ViewGesture::Paint,
             ]
         );
+
+        assert_eq!(
+            view_gesture(true, true, false, false, false, orbit),
+            ViewGesture::Orbit
+        );
     }
 
     #[test]
     fn control_press_solos_once_and_consumes_the_held_drag() {
+        let solo = begin_primary_drag(true, true, false, true);
+        assert_eq!(solo, PrimaryDrag::SoloConsumed);
         assert_eq!(
-            view_gesture(true, true, true, false, false, true),
+            view_gesture(true, true, true, false, false, solo),
             ViewGesture::Solo
         );
         assert_eq!(
-            view_gesture(true, true, false, false, false, true),
+            view_gesture(true, true, false, false, false, solo),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(true, true, true, false, true, true),
-            ViewGesture::Solo
+            begin_primary_drag(true, true, true, true),
+            PrimaryDrag::SoloConsumed
         );
     }
 
     #[test]
     fn secondary_press_samples_once_and_only_inside_the_model_view() {
         assert_eq!(
-            view_gesture(true, false, false, true, false, false),
+            view_gesture(true, false, false, true, false, PrimaryDrag::Idle),
             ViewGesture::Sample
         );
         assert_eq!(
-            view_gesture(true, false, false, false, false, false),
+            view_gesture(true, false, false, false, false, PrimaryDrag::Idle),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(false, false, false, true, false, false),
+            view_gesture(false, false, false, true, false, PrimaryDrag::Idle),
             ViewGesture::Idle
         );
         assert_eq!(
-            view_gesture(true, true, true, true, true, true),
+            view_gesture(true, true, true, true, true, PrimaryDrag::SoloConsumed),
             ViewGesture::Sample
         );
     }
@@ -1332,6 +1478,67 @@ mod tests {
         assert!(!app.document.is_dirty());
         assert_ne!(app.document.skin(), &changed);
         assert_eq!(app.document.undo_len(), 0);
+    }
+
+    #[test]
+    fn completed_open_dialog_loads_the_selected_skin() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("opened.png");
+        let mut expected = Skin::blank(ModelKind::Classic);
+        expected.set_pixel(Texel::new(8, 8), [11, 22, 33, 44]);
+        expected.save_png(&path).unwrap();
+        let mut app =
+            SkinDrawApp::from_document(SkinDocument::new(ModelKind::Classic), ModelKind::Classic);
+
+        complete_file_dialog(
+            &mut app,
+            FileDialogPurpose::Open,
+            Some(path.clone()),
+            &egui::Context::default(),
+        );
+
+        assert_eq!(app.document.path(), Some(path.as_path()));
+        assert_eq!(app.document.skin(), &expected);
+        assert!(!app.document.is_dirty());
+    }
+
+    #[test]
+    fn save_dialog_completion_runs_deferred_action_and_cancel_restores_confirmation() {
+        let directory = tempdir().unwrap();
+        let path_without_extension = directory.path().join("before-new");
+        let saved_path = directory.path().join("before-new.png");
+        let ctx = egui::Context::default();
+        let mut app = dirty_app();
+        let expected = app.document.skin().clone();
+
+        complete_file_dialog(
+            &mut app,
+            FileDialogPurpose::Save {
+                after_save: Some(DocumentAction::New(ModelKind::Slim)),
+            },
+            None,
+            &ctx,
+        );
+        assert_eq!(
+            app.pending_action,
+            Some(DocumentAction::New(ModelKind::Slim))
+        );
+        assert_eq!(app.kind, ModelKind::Classic);
+        assert!(app.document.is_dirty());
+
+        app.pending_action = None;
+        complete_file_dialog(
+            &mut app,
+            FileDialogPurpose::Save {
+                after_save: Some(DocumentAction::New(ModelKind::Slim)),
+            },
+            Some(path_without_extension),
+            &ctx,
+        );
+        assert_eq!(Skin::load_png(&saved_path).unwrap(), expected);
+        assert_eq!(app.kind, ModelKind::Slim);
+        assert!(app.pending_action.is_none());
+        assert!(!app.document.is_dirty());
     }
 
     #[test]
