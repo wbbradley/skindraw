@@ -1,25 +1,5 @@
 # Next Up
 
-## Persist an editable quick palette
-
-Turn the 16 fixed quick swatches into user-editable application preferences.
-
-- Move the current palette defaults from a compile-time constant into `SkinDrawApp` state. A normal
-  primary click selects a swatch as the active color; Shift + primary click overwrites that slot
-  with the current active RGBA color without changing the document.
-- Store all 16 RGBA entries in `~/.local/state/skindraw.json`, creating the parent directory when
-  needed. Load the state at startup and save palette changes atomically. Fall back safely to the
-  built-in defaults when the file is absent or invalid, and preserve a versioned/extensible file
-  shape for future application preferences.
-- Keep palette preferences global across New and Open operations and out of the skin PNG, document
-  dirty state, and undo/redo history.
-- Retain clear selected-swatch styling, render transparent entries over a checkerboard, and add
-  concise hover/help text explaining click and Shift-click behavior.
-- Test default initialization, assignment including transparent colors, missing and malformed
-  state-file fallback, save/restore round trips, and independence from document state. Manually
-  verify persistence across an application restart, then run formatting, warnings-denied Clippy,
-  and the full test suite.
-
 ## Flood-fill a contiguous face region
 
 Add a Fill tool that replaces one contiguous color region on the clicked model face with the active

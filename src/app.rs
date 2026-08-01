@@ -1,9 +1,14 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use eframe::egui::{
     self, Color32, Key, KeyboardShortcut, Modifiers, PointerButton, Rect, Sense, Vec2,
 };
 use glam::Vec2 as ModelVec2;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     BodyPart, BrushSize, Camera, LayerVisibility, ModelHit, ModelKind, Skin, SkinDocument,
@@ -11,7 +16,7 @@ use crate::{
     renderer::{ModelPaintCallback, ModelRenderer, TextureUpdate},
 };
 
-const PALETTE: [[u8; 4]; 16] = [
+const DEFAULT_PALETTE: [[u8; 4]; 16] = [
     [0, 0, 0, 255],
     [64, 64, 64, 255],
     [128, 128, 128, 255],
@@ -33,6 +38,7 @@ const PALETTE_COLUMNS: usize = 5;
 const PALETTE_SWATCH_SIZE: f32 = 28.0;
 const PALETTE_SPACING: f32 = 4.0;
 const TOOLS_HORIZONTAL_MARGIN: i8 = 12;
+const APP_STATE_VERSION: u32 = 1;
 
 const NEW_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -75,6 +81,12 @@ enum ColorControlTab {
     Rgba,
 }
 
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PersistedAppState {
+    version: u32,
+    palette: [[u8; 4]; 16],
+}
+
 pub struct SkinDrawApp {
     document: SkinDocument,
     kind: ModelKind,
@@ -82,6 +94,7 @@ pub struct SkinDrawApp {
     visibility: LayerVisibility,
     brush_size: BrushSize,
     active_color: [u8; 4],
+    palette: [[u8; 4]; 16],
     color_tab: ColorControlTab,
     hex_color: String,
     hex_color_invalid: bool,
@@ -103,7 +116,11 @@ impl SkinDrawApp {
             .as_ref()
             .expect("SkinDraw requires the WGPU renderer");
         ModelRenderer::install(render_state, document.skin());
-        Self::from_document(document, ModelKind::Classic)
+        let mut app = Self::from_document(document, ModelKind::Classic);
+        if let Some(path) = app_state_path() {
+            app.palette = load_palette(&path).unwrap_or(DEFAULT_PALETTE);
+        }
+        app
     }
 
     fn from_document(document: SkinDocument, kind: ModelKind) -> Self {
@@ -119,6 +136,7 @@ impl SkinDrawApp {
             visibility: LayerVisibility::ALL,
             brush_size: BrushSize::One,
             active_color: [237, 28, 36, 255],
+            palette: DEFAULT_PALETTE,
             color_tab: ColorControlTab::Hsv,
             hex_color: format_hex_color([237, 28, 36, 255]),
             hex_color_invalid: false,
@@ -232,21 +250,23 @@ impl SkinDrawApp {
                         egui::Grid::new("palette")
                             .spacing(Vec2::splat(4.0))
                             .show(ui, |ui| {
-                                for (index, &color) in PALETTE.iter().enumerate() {
-                                    let fill = Color32::from_rgba_unmultiplied(
-                                        color[0], color[1], color[2], color[3],
-                                    );
+                                for index in 0..self.palette.len() {
+                                    let color = self.palette[index];
                                     let selected = color == self.active_color;
-                                    let button = egui::Button::new("")
-                                        .min_size(Vec2::splat(PALETTE_SWATCH_SIZE))
-                                        .fill(fill)
-                                        .stroke(if selected {
-                                            egui::Stroke::new(2.0, Color32::WHITE)
+                                    let response = color_swatch(
+                                        ui,
+                                        Vec2::splat(PALETTE_SWATCH_SIZE),
+                                        color,
+                                        Sense::click(),
+                                        selected,
+                                    )
+                                    .on_hover_text("Click to select; Shift-click to replace");
+                                    if response.clicked() {
+                                        if ui.input(|input| input.modifiers.shift) {
+                                            self.store_palette_color(index);
                                         } else {
-                                            egui::Stroke::new(1.0, Color32::DARK_GRAY)
-                                        });
-                                    if ui.add(button).clicked() {
-                                        self.set_active_color(color);
+                                            self.set_active_color(color);
+                                        }
                                     }
                                     if (index + 1) % PALETTE_COLUMNS == 0 {
                                         ui.end_row();
@@ -272,7 +292,13 @@ impl SkinDrawApp {
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label("Active");
-                            color_swatch(ui, Vec2::new(72.0, 24.0), self.active_color);
+                            color_swatch(
+                                ui,
+                                Vec2::new(72.0, 24.0),
+                                self.active_color,
+                                Sense::hover(),
+                                false,
+                            );
                         });
 
                         ui.add_space(12.0);
@@ -429,6 +455,25 @@ impl SkinDrawApp {
         self.active_color = color;
         self.hex_color = format_hex_color(color);
         self.hex_color_invalid = false;
+    }
+
+    fn store_palette_color(&mut self, index: usize) {
+        self.assign_palette_color(index);
+        let Some(path) = app_state_path() else {
+            self.error_message =
+                Some("Could not find the home directory for palette state.".into());
+            return;
+        };
+        if let Err(error) = save_palette(&path, self.palette) {
+            self.error_message = Some(format!(
+                "Could not save palette to {}:\n{error}",
+                display_path(&path)
+            ));
+        }
+    }
+
+    fn assign_palette_color(&mut self, index: usize) {
+        self.palette[index] = self.active_color;
     }
 
     fn hsv_color_controls(&mut self, ui: &mut egui::Ui) {
@@ -749,8 +794,14 @@ fn parse_hex_color(text: &str) -> Option<[u8; 4]> {
     Some(u32::from_str_radix(digits, 16).ok()?.to_be_bytes())
 }
 
-fn color_swatch(ui: &mut egui::Ui, size: Vec2, color: [u8; 4]) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+fn color_swatch(
+    ui: &mut egui::Ui,
+    size: Vec2,
+    color: [u8; 4],
+    sense: Sense,
+    selected: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, sense);
     let square = 6.0;
     let columns = (rect.width() / square).ceil() as usize;
     let rows = (rect.height() / square).ceil() as usize;
@@ -774,10 +825,40 @@ fn color_swatch(ui: &mut egui::Ui, size: Vec2, color: [u8; 4]) -> egui::Response
     ui.painter().rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, Color32::GRAY),
+        if selected {
+            egui::Stroke::new(2.0, Color32::WHITE)
+        } else {
+            egui::Stroke::new(1.0, Color32::GRAY)
+        },
         egui::StrokeKind::Inside,
     );
     response
+}
+
+fn app_state_path() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".local/state/skindraw.json"))
+}
+
+fn load_palette(path: &Path) -> Option<[[u8; 4]; 16]> {
+    let bytes = fs::read(path).ok()?;
+    let state: PersistedAppState = serde_json::from_slice(&bytes).ok()?;
+    (state.version == APP_STATE_VERSION).then_some(state.palette)
+}
+
+fn save_palette(path: &Path, palette: [[u8; 4]; 16]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let state = PersistedAppState {
+        version: APP_STATE_VERSION,
+        palette,
+    };
+    let bytes = serde_json::to_vec_pretty(&state).map_err(io::Error::other)?;
+    let temporary = path.with_extension("json.tmp");
+    fs::write(&temporary, bytes)?;
+    fs::rename(temporary, path)
 }
 
 fn file_dialog(current: Option<PathBuf>) -> rfd::FileDialog {
@@ -879,9 +960,55 @@ mod tests {
 
     #[test]
     fn palette_has_opaque_choices_and_transparent_eraser() {
-        assert!(PALETTE.iter().any(|color| color[3] == 255));
-        assert!(PALETTE.iter().any(|color| color[3] == 0));
-        assert_eq!(PALETTE.len(), 16);
+        assert!(DEFAULT_PALETTE.iter().any(|color| color[3] == 255));
+        assert!(DEFAULT_PALETTE.iter().any(|color| color[3] == 0));
+        assert_eq!(DEFAULT_PALETTE.len(), 16);
+    }
+
+    #[test]
+    fn editable_palette_assignment_is_independent_from_document_state() {
+        let document = SkinDocument::new(ModelKind::Classic);
+        let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
+        let skin = app.document.skin().clone();
+        app.set_active_color([9, 8, 7, 0]);
+        app.assign_palette_color(3);
+        assert_eq!(app.palette[3], [9, 8, 7, 0]);
+        assert_eq!(app.active_color, [9, 8, 7, 0]);
+        assert_eq!(app.document.skin(), &skin);
+        assert!(!app.document.is_dirty());
+        assert_eq!(app.document.undo_len(), 0);
+        assert_eq!(app.document.redo_len(), 0);
+    }
+
+    #[test]
+    fn palette_state_round_trips_and_invalid_state_falls_back() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("state/skindraw.json");
+        let mut palette = DEFAULT_PALETTE;
+        palette[0] = [1, 2, 3, 4];
+        palette[15] = [250, 240, 230, 0];
+        save_palette(&path, palette).unwrap();
+        assert_eq!(load_palette(&path), Some(palette));
+        assert!(!path.with_extension("json.tmp").exists());
+
+        fs::write(&path, b"not json").unwrap();
+        assert_eq!(
+            load_palette(&path).unwrap_or(DEFAULT_PALETTE),
+            DEFAULT_PALETTE
+        );
+        fs::write(
+            &path,
+            serde_json::to_vec(&PersistedAppState {
+                version: APP_STATE_VERSION + 1,
+                palette,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_palette(&path).unwrap_or(DEFAULT_PALETTE),
+            DEFAULT_PALETTE
+        );
     }
 
     #[test]
@@ -996,6 +1123,7 @@ mod tests {
     fn dirty_replacement_is_guarded_and_discard_replaces_atomically() {
         let mut app = dirty_app();
         app.solo_part = Some(BodyPart::Head);
+        app.palette[0] = [11, 22, 33, 44];
         let changed = app.document.skin().clone();
         let ctx = egui::Context::default();
         app.request_action(DocumentAction::New(ModelKind::Slim), &ctx);
@@ -1010,6 +1138,7 @@ mod tests {
         app.execute_action(DocumentAction::New(ModelKind::Slim), &ctx);
         assert_eq!(app.kind, ModelKind::Slim);
         assert_eq!(app.solo_part, None);
+        assert_eq!(app.palette[0], [11, 22, 33, 44]);
         assert!(!app.document.is_dirty());
         assert_ne!(app.document.skin(), &changed);
         assert_eq!(app.document.undo_len(), 0);
