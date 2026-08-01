@@ -1,6 +1,6 @@
 [package]
 name = "skindraw"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Will Bradley <williambbradley@gmail.com>"]
 description = "A desktop editor for Minecraft-compatible player skins"
