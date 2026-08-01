@@ -1,0 +1,220 @@
+---
+name: Package Linux
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-linux-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Build Ubuntu package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --no-self-update
+          rustup default stable
+
+      - name: Install native tools and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            desktop-file-utils \
+            dpkg-dev \
+            jq \
+            liblzma-dev \
+            librsvg2-bin \
+            libssl-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libxml2-utils \
+            pkg-config
+
+      - name: Verify package version and tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | \
+            jq -r '.packages[] | select(.name == "skindraw") | .version')"
+          if [[ -z "$package_version" || "$package_version" == "null" ]]; then
+            echo "Unable to read the skindraw package version" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$package_version" ]]; then
+            echo "Release tag $GITHUB_REF_NAME must equal v$package_version" >&2
+            exit 1
+          fi
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "debian_version=$package_version-1" >> "$GITHUB_OUTPUT"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Install pinned cargo-deb
+        run: cargo install cargo-deb --version 3.7.0 --locked
+
+      - name: Build Debian package
+        run: cargo deb --no-build --locked
+
+      - name: Validate package
+        id: package
+        env:
+          DEBIAN_VERSION: ${{ steps.version.outputs.debian_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          desktop_file="assets/io.github.wbbradley.SkinDraw.desktop"
+          icon_file="assets/io.github.wbbradley.SkinDraw.svg"
+          deb_path="$(find target/debian -maxdepth 1 -type f -name 'skindraw_*_amd64.deb' -print -quit)"
+          if [[ -z "$deb_path" ]]; then
+            echo "cargo-deb did not produce an amd64 package" >&2
+            exit 1
+          fi
+
+          desktop-file-validate "$desktop_file"
+          xmllint --noout "$icon_file"
+          rsvg-convert --width 64 --height 64 "$icon_file" \
+            --output target/debian/skindraw-icon-64.png
+
+          [[ "$(dpkg-deb --field "$deb_path" Package)" == "skindraw" ]]
+          [[ "$(dpkg-deb --field "$deb_path" Architecture)" == "amd64" ]]
+          [[ "$(dpkg-deb --field "$deb_path" Version)" == "$DEBIAN_VERSION" ]]
+          [[ -n "$(dpkg-deb --field "$deb_path" Depends)" ]]
+
+          package_contents="$(dpkg-deb --contents "$deb_path")"
+          grep -Eq '^-rwxr-xr-x .* ./usr/bin/skindraw$' <<<"$package_contents"
+          grep -Eq '^-rw-r--r-- .* ./usr/share/applications/io.github.wbbradley.SkinDraw.desktop$' \
+            <<<"$package_contents"
+          grep -Eq '^-rw-r--r-- .* ./usr/share/icons/hicolor/scalable/apps/io.github.wbbradley.SkinDraw.svg$' \
+            <<<"$package_contents"
+          grep -Eq '^-rw-r--r-- .* ./usr/share/doc/skindraw/README.md$' <<<"$package_contents"
+
+          ldd target/release/skindraw | tee target/debian/skindraw-linked-libraries.txt
+          if grep -q 'not found' target/debian/skindraw-linked-libraries.txt; then
+            echo "Release binary has unresolved shared libraries" >&2
+            exit 1
+          fi
+
+          metadata_path="target/debian/skindraw-package-metadata.txt"
+          {
+            echo "SHA256"
+            sha256sum "$deb_path"
+            echo
+            echo "CONTROL"
+            dpkg-deb --info "$deb_path"
+            echo
+            echo "DEPENDENCIES"
+            dpkg-deb --field "$deb_path" Depends
+            echo
+            echo "CONTENTS"
+            dpkg-deb --contents "$deb_path"
+            echo
+            echo "LINKED LIBRARIES"
+            cat target/debian/skindraw-linked-libraries.txt
+          } > "$metadata_path"
+
+          old_root="$(mktemp -d)"
+          dpkg-deb --raw-extract "$deb_path" "$old_root"
+          sed -i 's/^Version: .*/Version: 0.0.0-1/' "$old_root/DEBIAN/control"
+          old_deb="target/debian/skindraw_0.0.0-1_amd64.deb"
+          dpkg-deb --root-owner-group --build "$old_root" "$old_deb"
+
+          docker run --rm \
+            --env NEW_DEB="$(basename "$deb_path")" \
+            --env OLD_DEB="$(basename "$old_deb")" \
+            --env NEW_VERSION="$DEBIAN_VERSION" \
+            --volume "$PWD/target/debian:/packages:ro" \
+            ubuntu:22.04 \
+            bash -euo pipefail -c '
+              apt-get update
+              apt-get install -y "/packages/$OLD_DEB"
+              test "$(dpkg-query --showformat="${Version}" --show skindraw)" = "0.0.0-1"
+              apt-get install -y "/packages/$NEW_DEB"
+              test "$(dpkg-query --showformat="${Version}" --show skindraw)" = "$NEW_VERSION"
+              test -x /usr/bin/skindraw
+              test -f /usr/share/applications/io.github.wbbradley.SkinDraw.desktop
+              test -f /usr/share/icons/hicolor/scalable/apps/io.github.wbbradley.SkinDraw.svg
+              apt-get remove -y skindraw
+              test ! -e /usr/bin/skindraw
+              test ! -e /usr/share/applications/io.github.wbbradley.SkinDraw.desktop
+              test ! -e /usr/share/icons/hicolor/scalable/apps/io.github.wbbradley.SkinDraw.svg
+            '
+
+          rm -f "$old_deb" target/debian/skindraw-icon-64.png \
+            target/debian/skindraw-linked-libraries.txt
+          echo "deb_path=$deb_path" >> "$GITHUB_OUTPUT"
+          echo "metadata_path=$metadata_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: skindraw-ubuntu-amd64
+          path: |
+            ${{ steps.package.outputs.deb_path }}
+            ${{ steps.package.outputs.metadata_path }}
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: skindraw-ubuntu-amd64
+          path: release-artifact
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb_path="$(find release-artifact -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          if [[ -z "$deb_path" ]]; then
+            echo "Downloaded artifact does not contain a Debian package" >&2
+            exit 1
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$deb_path" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$deb_path" \
+              --verify-tag \
+              --generate-notes \
+              --title "SkinDraw $GITHUB_REF_NAME"
+          fi

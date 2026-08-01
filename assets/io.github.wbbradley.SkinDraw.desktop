@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=SkinDraw
+Comment=Create and edit Minecraft-compatible player skins
+Exec=skindraw
+TryExec=skindraw
+Icon=io.github.wbbradley.SkinDraw
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.wbbradley.SkinDraw
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=Minecraft;Skin;Pixel Art;Texture;
