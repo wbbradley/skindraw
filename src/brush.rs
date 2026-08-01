@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::{
     atlas::{AtlasRect, face_region},
@@ -99,6 +99,38 @@ impl StrokeBuilder {
             .count()
     }
 
+    pub fn flood_fill(&mut self, skin: &mut Skin, kind: ModelKind, hit: ModelHit, color: [u8; 4]) {
+        self.previous = None;
+        let rect = face_region(kind, hit.part, hit.layer, hit.face).rect;
+        let target = skin.pixel(hit.texel);
+        if target == color {
+            return;
+        }
+        let mut visited = [false; 64 * 64];
+        let mut pending = VecDeque::from([hit.texel]);
+        while let Some(texel) = pending.pop_front() {
+            let index = usize::from(texel.y) * 64 + usize::from(texel.x);
+            if visited[index] {
+                continue;
+            }
+            visited[index] = true;
+            if !rect.contains(texel) || skin.pixel(texel) != target {
+                continue;
+            }
+            self.replace_pixel(skin, texel, color);
+            for (x, y) in [
+                (i16::from(texel.x) - 1, i16::from(texel.y)),
+                (i16::from(texel.x) + 1, i16::from(texel.y)),
+                (i16::from(texel.x), i16::from(texel.y) - 1),
+                (i16::from(texel.x), i16::from(texel.y) + 1),
+            ] {
+                if (0..64).contains(&x) && (0..64).contains(&y) {
+                    pending.push_back(Texel::new(x as u8, y as u8));
+                }
+            }
+        }
+    }
+
     pub(crate) fn finish(mut self) -> Stroke {
         self.stroke
             .changes
@@ -115,22 +147,26 @@ impl StrokeBuilder {
         color: [u8; 4],
     ) {
         for texel in clipped_footprint(rect, center, size) {
-            let before = skin.pixel(texel);
-            if before == color {
-                continue;
-            }
-            skin.set_pixel(texel, color);
-            if let Some(&index) = self.change_indices.get(&texel) {
-                self.stroke.changes[index].after = color;
-            } else {
-                let index = self.stroke.changes.len();
-                self.stroke.changes.push(PixelChange {
-                    texel,
-                    before,
-                    after: color,
-                });
-                self.change_indices.insert(texel, index);
-            }
+            self.replace_pixel(skin, texel, color);
+        }
+    }
+
+    fn replace_pixel(&mut self, skin: &mut Skin, texel: Texel, color: [u8; 4]) {
+        let before = skin.pixel(texel);
+        if before == color {
+            return;
+        }
+        skin.set_pixel(texel, color);
+        if let Some(&index) = self.change_indices.get(&texel) {
+            self.stroke.changes[index].after = color;
+        } else {
+            let index = self.stroke.changes.len();
+            self.stroke.changes.push(PixelChange {
+                texel,
+                before,
+                after: color,
+            });
+            self.change_indices.insert(texel, index);
         }
     }
 }
@@ -386,5 +422,69 @@ mod tests {
         assert_eq!(document.undo_len(), 1);
         assert!(document.undo());
         assert_eq!(document.skin().pixel(Texel::new(8, 8)), [255; 4]);
+    }
+
+    #[test]
+    fn flood_fill_is_four_connected_rgba_exact_and_face_bounded() {
+        let mut skin = Skin::transparent();
+        let source = [1, 2, 3, 4];
+        for texel in [
+            Texel::new(8, 8),
+            Texel::new(9, 8),
+            Texel::new(8, 9),
+            Texel::new(10, 10),
+            Texel::new(7, 8),
+        ] {
+            skin.set_pixel(texel, source);
+        }
+        skin.set_pixel(Texel::new(9, 9), [1, 2, 3, 5]);
+        let mut stroke = StrokeBuilder::new();
+        stroke.flood_fill(
+            &mut skin,
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(8, 8)),
+            [9, 8, 7, 6],
+        );
+        assert_eq!(stroke.changed_pixel_count(), 3);
+        for texel in [Texel::new(8, 8), Texel::new(9, 8), Texel::new(8, 9)] {
+            assert_eq!(skin.pixel(texel), [9, 8, 7, 6]);
+        }
+        assert_eq!(skin.pixel(Texel::new(10, 10)), source);
+        assert_eq!(skin.pixel(Texel::new(7, 8)), source);
+        assert_eq!(skin.pixel(Texel::new(9, 9)), [1, 2, 3, 5]);
+    }
+
+    #[test]
+    fn flood_fill_handles_transparent_outer_faces() {
+        let mut skin = Skin::transparent();
+        let target = ModelHit {
+            part: BodyPart::Torso,
+            layer: Layer::Outer,
+            face: Face::Front,
+            distance: 1.0,
+            texel: Texel::new(20, 36),
+        };
+        let region = face_region(ModelKind::Classic, target.part, target.layer, target.face);
+        let mut stroke = StrokeBuilder::new();
+        stroke.flood_fill(&mut skin, ModelKind::Classic, target, [20, 40, 60, 128]);
+        assert_eq!(
+            stroke.changed_pixel_count(),
+            usize::from(region.rect.width) * usize::from(region.rect.height)
+        );
+        assert_eq!(skin.pixel(Texel::new(19, 36)), [0; 4]);
+    }
+
+    #[test]
+    fn document_flood_fill_is_one_undoable_entry_and_same_color_is_a_no_op() {
+        let mut document = SkinDocument::new(ModelKind::Classic);
+        let target = hit(BodyPart::Head, Face::Front, Texel::new(8, 8));
+        assert!(document.flood_fill(ModelKind::Classic, target, [4, 3, 2, 1]));
+        assert_eq!(document.undo_len(), 1);
+        assert!(!document.flood_fill(ModelKind::Classic, target, [4, 3, 2, 1]));
+        assert_eq!(document.undo_len(), 1);
+        assert!(document.undo());
+        assert_eq!(document.skin().pixel(target.texel), [255; 4]);
+        assert!(document.redo());
+        assert_eq!(document.skin().pixel(target.texel), [4, 3, 2, 1]);
     }
 }

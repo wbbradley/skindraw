@@ -221,6 +221,12 @@ impl SkinDocument {
         builder.paint(&mut self.skin, kind, hit, size, color);
     }
 
+    pub fn flood_fill(&mut self, kind: ModelKind, hit: ModelHit, color: [u8; 4]) -> bool {
+        let mut builder = StrokeBuilder::new();
+        builder.flood_fill(&mut self.skin, kind, hit, color);
+        self.commit_stroke(builder)
+    }
+
     pub fn commit_stroke(&mut self, builder: StrokeBuilder) -> bool {
         let stroke = builder.finish();
         if stroke.changes.is_empty() {

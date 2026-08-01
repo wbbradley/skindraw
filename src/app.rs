@@ -81,6 +81,12 @@ enum ColorControlTab {
     Rgba,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PaintTool {
+    Brush,
+    Fill,
+}
+
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct PersistedAppState {
     version: u32,
@@ -92,6 +98,7 @@ pub struct SkinDrawApp {
     kind: ModelKind,
     camera: Camera,
     visibility: LayerVisibility,
+    tool: PaintTool,
     brush_size: BrushSize,
     active_color: [u8; 4],
     palette: [[u8; 4]; 16],
@@ -134,6 +141,7 @@ impl SkinDrawApp {
                 ..Default::default()
             },
             visibility: LayerVisibility::ALL,
+            tool: PaintTool::Brush,
             brush_size: BrushSize::One,
             active_color: [237, 28, 36, 255],
             palette: DEFAULT_PALETTE,
@@ -238,7 +246,18 @@ impl SkinDrawApp {
                         }
                         ui.add_space(10.0);
 
-                        ui.label("Brush");
+                        ui.label("Tool");
+                        let mut requested_tool = self.tool;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut requested_tool, PaintTool::Brush, "Brush (B)");
+                            ui.selectable_value(&mut requested_tool, PaintTool::Fill, "Fill (F)");
+                        });
+                        if requested_tool != self.tool {
+                            self.set_tool(requested_tool);
+                        }
+                        ui.add_space(6.0);
+
+                        ui.label("Brush size");
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut self.brush_size, BrushSize::One, "1");
                             ui.selectable_value(&mut self.brush_size, BrushSize::Two, "2");
@@ -329,7 +348,8 @@ impl SkinDrawApp {
 
                         ui.add_space(12.0);
                         ui.separator();
-                        ui.label("Paint: primary-button drag");
+                        ui.label("Brush: primary-button drag");
+                        ui.label("Fill: primary-button click");
                         ui.label("Orbit: Shift + primary drag");
                         if let Some(part) = self.solo_part {
                             ui.label(format!("Solo: {part:?} (Escape to exit)"));
@@ -388,10 +408,25 @@ impl SkinDrawApp {
             }
             ViewGesture::Paint => {
                 if let Some(hit) = self.hovered_hit {
-                    let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
-                    self.document
-                        .paint(stroke, self.kind, hit, self.brush_size, self.active_color);
-                    self.status_message = None;
+                    match self.tool {
+                        PaintTool::Brush => {
+                            let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
+                            self.document.paint(
+                                stroke,
+                                self.kind,
+                                hit,
+                                self.brush_size,
+                                self.active_color,
+                            );
+                            self.status_message = None;
+                        }
+                        PaintTool::Fill if primary_pressed => {
+                            self.finish_stroke();
+                            self.document.flood_fill(self.kind, hit, self.active_color);
+                            self.status_message = None;
+                        }
+                        PaintTool::Fill => {}
+                    }
                 }
             }
             ViewGesture::Solo => {
@@ -423,7 +458,11 @@ impl SkinDrawApp {
                 } else {
                     self.hovered_hit
                 },
-                brush_size: self.brush_size,
+                brush_size: if self.tool == PaintTool::Brush {
+                    self.brush_size
+                } else {
+                    BrushSize::One
+                },
                 solo_part: self.solo_part,
             }
             .paint_callback(),
@@ -448,6 +487,13 @@ impl SkinDrawApp {
     fn finish_stroke(&mut self) {
         if let Some(stroke) = self.active_stroke.take() {
             self.document.commit_stroke(stroke);
+        }
+    }
+
+    fn set_tool(&mut self, tool: PaintTool) {
+        if self.tool != tool {
+            self.finish_stroke();
+            self.tool = tool;
         }
     }
 
@@ -541,6 +587,23 @@ impl SkinDrawApp {
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.solo_part = None;
+        }
+        let text_input_focused = ctx.text_edit_focused();
+        let tool = ctx.input(|input| {
+            tool_shortcut(
+                input.key_pressed(Key::B),
+                input.key_pressed(Key::F),
+                text_input_focused,
+                input.modifiers == Modifiers::NONE,
+            )
+        });
+        if let Some(tool) = tool {
+            let key = match tool {
+                PaintTool::Brush => Key::B,
+                PaintTool::Fill => Key::F,
+            };
+            ctx.input_mut(|input| input.consume_key(Modifiers::NONE, key));
+            self.set_tool(tool);
         }
         if consume(ctx, SAVE_AS_SHORTCUT) {
             self.save_as();
@@ -779,6 +842,23 @@ fn view_gesture(
     }
 }
 
+fn tool_shortcut(
+    brush_pressed: bool,
+    fill_pressed: bool,
+    text_input_focused: bool,
+    unmodified: bool,
+) -> Option<PaintTool> {
+    if text_input_focused || !unmodified {
+        None
+    } else if brush_pressed {
+        Some(PaintTool::Brush)
+    } else if fill_pressed {
+        Some(PaintTool::Fill)
+    } else {
+        None
+    }
+}
+
 fn format_hex_color(color: [u8; 4]) -> String {
     format!(
         "#{:02X}{:02X}{:02X}{:02X}",
@@ -891,7 +971,8 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
     let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
     let body_text_width = [
         "Enable a layer to paint.",
-        "Paint: primary-button drag",
+        "Brush: primary-button drag",
+        "Fill: primary-button click",
         "Orbit: Shift + primary drag",
         "Solo: RightArm (Escape to exit)",
     ]
@@ -1048,6 +1129,48 @@ mod tests {
             [1, 2, 4]
         );
         assert_eq!(Texel::new(1, 2).x, 1);
+    }
+
+    #[test]
+    fn brush_and_fill_shortcuts_ignore_text_input_and_modifiers() {
+        assert_eq!(
+            tool_shortcut(true, false, false, true),
+            Some(PaintTool::Brush)
+        );
+        assert_eq!(
+            tool_shortcut(false, true, false, true),
+            Some(PaintTool::Fill)
+        );
+        assert_eq!(tool_shortcut(true, false, true, true), None);
+        assert_eq!(tool_shortcut(false, true, true, true), None);
+        assert_eq!(tool_shortcut(true, false, false, false), None);
+        assert_eq!(tool_shortcut(false, false, false, true), None);
+    }
+
+    #[test]
+    fn changing_tools_commits_an_active_brush_stroke() {
+        let document = SkinDocument::new(ModelKind::Classic);
+        let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
+        let mut stroke = StrokeBuilder::new();
+        app.document.paint(
+            &mut stroke,
+            ModelKind::Classic,
+            ModelHit {
+                part: BodyPart::Head,
+                layer: crate::Layer::Base,
+                face: crate::Face::Front,
+                distance: 1.0,
+                texel: Texel::new(8, 8),
+            },
+            BrushSize::One,
+            [1, 2, 3, 4],
+        );
+        app.active_stroke = Some(stroke);
+        assert_eq!(app.document.undo_len(), 0);
+        app.set_tool(PaintTool::Fill);
+        assert_eq!(app.tool, PaintTool::Fill);
+        assert!(app.active_stroke.is_none());
+        assert_eq!(app.document.undo_len(), 1);
     }
 
     #[test]
