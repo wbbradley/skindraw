@@ -8,14 +8,11 @@ body-part soloing, editable colors, and face-bounded flood fill.
 
 The Linux package supports amd64 Ubuntu 22.04 and newer. Download the `.deb` from the
 [latest GitHub Release](https://github.com/wbbradley/skindraw/releases/latest), then install it with
-APT. For the initial release:
+APT, substituting the downloaded package's version:
 
 ```bash
-curl -LO https://github.com/wbbradley/skindraw/releases/download/v0.1.0/skindraw_0.1.0-1_amd64.deb
-```
-
-```bash
-sudo apt install ./skindraw_0.1.0-1_amd64.deb
+VERSION=0.1.1
+sudo apt install "./skindraw_${VERSION}-1_amd64.deb"
 ```
 
 SkinDraw will appear in GNOME's application search. Installing a newer `.deb` upgrades the existing
@@ -63,8 +60,9 @@ For a release, first update `version` in `Cargo.toml` and refresh `Cargo.lock`. 
 changes, then create and push the exactly matching tag:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+VERSION=0.1.1
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
 The workflow rejects tags that do not equal `v` followed by the Cargo package version. A successful
