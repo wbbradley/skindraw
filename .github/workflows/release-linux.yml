@@ -156,9 +156,9 @@ jobs:
             bash -euo pipefail -c '
               apt-get update
               apt-get install -y "/packages/$OLD_DEB"
-              test "$(dpkg-query --showformat="${Version}" --show skindraw)" = "0.0.0-1"
+              test "$(dpkg-query --showformat="\${Version}" --show skindraw)" = "0.0.0-1"
               apt-get install -y "/packages/$NEW_DEB"
-              test "$(dpkg-query --showformat="${Version}" --show skindraw)" = "$NEW_VERSION"
+              test "$(dpkg-query --showformat="\${Version}" --show skindraw)" = "$NEW_VERSION"
               test -x /usr/bin/skindraw
               test -f /usr/share/applications/io.github.wbbradley.SkinDraw.desktop
               test -f /usr/share/icons/hicolor/scalable/apps/io.github.wbbradley.SkinDraw.svg
