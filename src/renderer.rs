@@ -11,7 +11,8 @@ use eframe::{
 use glam::{Mat4, Vec3};
 
 use crate::{
-    Camera, Face, Layer, LayerVisibility, ModelHit, ModelKind, Skin, face_region, model_boxes,
+    BrushSize, Camera, Face, Layer, LayerVisibility, ModelHit, ModelKind, Skin, brush_footprint,
+    face_region, model_boxes,
     skin::{SKIN_HEIGHT, SKIN_WIDTH},
 };
 
@@ -71,7 +72,8 @@ pub struct ModelPaintCallback {
     pub camera: Camera,
     pub skin: Arc<Skin>,
     pub texture_update: Option<TextureUpdate>,
-    pub hit: Option<ModelHit>,
+    pub preview_hit: Option<ModelHit>,
+    pub brush_size: BrushSize,
 }
 
 impl ModelPaintCallback {
@@ -115,19 +117,27 @@ struct Vertex {
     position: [f32; 3],
     uv: [f32; 2],
     shade: f32,
-    highlight: f32,
 }
 
 impl Vertex {
     const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: size_of::<Self>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![
-            0 => Float32x3,
-            1 => Float32x2,
-            2 => Float32,
-            3 => Float32
-        ],
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Float32],
+    };
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PreviewVertex {
+    position: [f32; 3],
+}
+
+impl PreviewVertex {
+    const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: size_of::<Self>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3],
     };
 }
 
@@ -148,6 +158,7 @@ struct RenderTargets {
 
 pub struct ModelRenderer {
     model_pipeline: wgpu::RenderPipeline,
+    preview_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
     skin_texture: wgpu::Texture,
     skin_bind_group: wgpu::BindGroup,
@@ -156,6 +167,8 @@ pub struct ModelRenderer {
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
     vertex_count: u32,
+    preview_buffer: wgpu::Buffer,
+    preview_vertex_count: u32,
     composite_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     targets: Option<RenderTargets>,
@@ -311,6 +324,50 @@ impl ModelRenderer {
             cache: None,
         });
 
+        let preview_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("brush preview shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(PREVIEW_SHADER)),
+        });
+        let preview_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("brush preview pipeline layout"),
+            bind_group_layouts: &[Some(&scene_layout)],
+            immediate_size: 0,
+        });
+        let preview_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("brush preview pipeline"),
+            layout: Some(&preview_layout),
+            vertex: wgpu::VertexState {
+                module: &preview_shader,
+                entry_point: Some("vertex_main"),
+                buffers: &[PreviewVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &preview_shader,
+                entry_point: Some("fragment_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TARGET_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model composite layout"),
             entries: &[
@@ -374,8 +431,15 @@ impl ModelRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let preview_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("brush preview vertices"),
+            size: (16 * 6 * size_of::<PreviewVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut renderer = Self {
             model_pipeline,
+            preview_pipeline,
             composite_pipeline,
             skin_texture,
             skin_bind_group,
@@ -384,6 +448,8 @@ impl ModelRenderer {
             vertex_buffer,
             vertex_capacity,
             vertex_count: 0,
+            preview_buffer,
+            preview_vertex_count: 0,
             composite_layout,
             sampler,
             targets: None,
@@ -411,10 +477,19 @@ impl ModelRenderer {
             .max(1.0) as u32;
         self.ensure_targets(device, [width, height]);
 
-        let vertices = model_vertices(callback.kind, callback.visibility, callback.hit);
+        let vertices = model_vertices(callback.kind, callback.visibility);
         debug_assert!(vertices.len() <= self.vertex_capacity);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         self.vertex_count = vertices.len() as u32;
+        let preview_vertices = callback.preview_hit.map_or_else(Vec::new, |hit| {
+            preview_vertices(callback.kind, hit, callback.brush_size)
+        });
+        queue.write_buffer(
+            &self.preview_buffer,
+            0,
+            bytemuck::cast_slice(&preview_vertices),
+        );
+        self.preview_vertex_count = preview_vertices.len() as u32;
         let aspect = width as f32 / height as f32;
         let half_height = callback.camera.orthographic_height * 0.5;
         let half_width = half_height * aspect;
@@ -475,6 +550,12 @@ impl ModelRenderer {
         pass.set_bind_group(1, &self.skin_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+        if self.preview_vertex_count > 0 {
+            pass.set_pipeline(&self.preview_pipeline);
+            pass.set_bind_group(0, &self.scene_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.preview_buffer.slice(..));
+            pass.draw(0..self.preview_vertex_count, 0..1);
+        }
     }
 
     fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
@@ -585,11 +666,7 @@ fn camera_up(camera: Camera) -> Vec3 {
     right.cross(camera.view_direction()).normalize_or_zero()
 }
 
-fn model_vertices(
-    kind: ModelKind,
-    visibility: LayerVisibility,
-    hit: Option<ModelHit>,
-) -> Vec<Vertex> {
+fn model_vertices(kind: ModelKind, visibility: LayerVisibility) -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(12 * 6 * 6);
     for layer in [Layer::Base, Layer::Outer] {
         let visible = match layer {
@@ -612,9 +689,6 @@ fn model_vertices(
                 let y1 = f32::from(region.rect.y + region.rect.height) / SKIN_HEIGHT as f32;
                 let (u0, u1) = if region.flip_u { (x1, x0) } else { (x0, x1) };
                 let (v0, v1) = if region.flip_v { (y1, y0) } else { (y0, y1) };
-                let highlighted = hit.is_some_and(|item| {
-                    item.part == model_box.part && item.layer == layer && item.face == face
-                }) as u8 as f32;
                 let shade = match face {
                     Face::Top => 1.0,
                     Face::Front | Face::Left => 0.88,
@@ -622,12 +696,12 @@ fn model_vertices(
                     Face::Bottom => 0.58,
                 };
                 let quad = [
-                    vertex(corners[0], [u0, v0], shade, highlighted),
-                    vertex(corners[1], [u1, v0], shade, highlighted),
-                    vertex(corners[2], [u1, v1], shade, highlighted),
-                    vertex(corners[0], [u0, v0], shade, highlighted),
-                    vertex(corners[2], [u1, v1], shade, highlighted),
-                    vertex(corners[3], [u0, v1], shade, highlighted),
+                    vertex(corners[0], [u0, v0], shade),
+                    vertex(corners[1], [u1, v0], shade),
+                    vertex(corners[2], [u1, v1], shade),
+                    vertex(corners[0], [u0, v0], shade),
+                    vertex(corners[2], [u1, v1], shade),
+                    vertex(corners[3], [u0, v1], shade),
                 ];
                 vertices.extend_from_slice(&quad);
             }
@@ -636,12 +710,86 @@ fn model_vertices(
     vertices
 }
 
-fn vertex(position: Vec3, uv: [f32; 2], shade: f32, highlight: f32) -> Vertex {
+fn vertex(position: Vec3, uv: [f32; 2], shade: f32) -> Vertex {
     Vertex {
         position: position.to_array(),
         uv,
         shade,
-        highlight,
+    }
+}
+
+fn preview_vertices(kind: ModelKind, hit: ModelHit, size: BrushSize) -> Vec<PreviewVertex> {
+    let Some(model_box) = model_boxes(kind)
+        .into_iter()
+        .find(|item| item.part == hit.part && item.layer == hit.layer)
+    else {
+        return Vec::new();
+    };
+    let region = face_region(kind, hit.part, hit.layer, hit.face);
+    let corners = face_corners(model_box.min, model_box.max, hit.face);
+    let normal = face_normal(hit.face) * 0.01;
+    let mut vertices = Vec::with_capacity(usize::from(size.pixels()).pow(2) * 6);
+    for texel in brush_footprint(kind, hit, size) {
+        let atlas_u = texel.x - region.rect.x;
+        let atlas_v = texel.y - region.rect.y;
+        let local_u = if region.flip_u {
+            region.rect.width - 1 - atlas_u
+        } else {
+            atlas_u
+        };
+        let local_v = if region.flip_v {
+            region.rect.height - 1 - atlas_v
+        } else {
+            atlas_v
+        };
+        let u0 = f32::from(local_u) / f32::from(region.rect.width);
+        let u1 = f32::from(local_u + 1) / f32::from(region.rect.width);
+        let v0 = f32::from(local_v) / f32::from(region.rect.height);
+        let v1 = f32::from(local_v + 1) / f32::from(region.rect.height);
+        let quad = [
+            face_point(corners, u0, v0) + normal,
+            face_point(corners, u1, v0) + normal,
+            face_point(corners, u1, v1) + normal,
+            face_point(corners, u0, v1) + normal,
+        ];
+        vertices.extend([
+            PreviewVertex {
+                position: quad[0].to_array(),
+            },
+            PreviewVertex {
+                position: quad[1].to_array(),
+            },
+            PreviewVertex {
+                position: quad[2].to_array(),
+            },
+            PreviewVertex {
+                position: quad[0].to_array(),
+            },
+            PreviewVertex {
+                position: quad[2].to_array(),
+            },
+            PreviewVertex {
+                position: quad[3].to_array(),
+            },
+        ]);
+    }
+    vertices
+}
+
+fn face_point(corners: [Vec3; 4], u: f32, v: f32) -> Vec3 {
+    corners[0]
+        .lerp(corners[1], u)
+        .lerp(corners[3].lerp(corners[2], u), v)
+}
+
+fn face_normal(face: Face) -> Vec3 {
+    match face {
+        Face::Front => Vec3::Z,
+        Face::Back => -Vec3::Z,
+        Face::Left => Vec3::X,
+        Face::Right => -Vec3::X,
+        Face::Top => Vec3::Y,
+        Face::Bottom => -Vec3::Y,
     }
 }
 
@@ -699,14 +847,12 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) shade: f32,
-    @location(3) highlight: f32,
 };
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) shade: f32,
-    @location(2) highlight: f32,
 };
 
 @vertex
@@ -715,7 +861,6 @@ fn vertex_main(input: VertexInput) -> VertexOutput {
     output.position = scene.view_projection * vec4<f32>(input.position, 1.0);
     output.uv = input.uv;
     output.shade = input.shade;
-    output.highlight = input.highlight;
     return output;
 }
 
@@ -725,9 +870,25 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if color.a < 0.004 {
         discard;
     }
-    let lit = vec3<f32>(color.rgb * input.shade);
-    let highlighted = mix(lit, vec3<f32>(1.0, 0.78, 0.18), input.highlight * 0.26);
-    return vec4<f32>(highlighted, color.a);
+    return vec4<f32>(color.rgb * input.shade, color.a);
+}
+"#;
+
+const PREVIEW_SHADER: &str = r#"
+struct Scene {
+    view_projection: mat4x4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> scene: Scene;
+
+@vertex
+fn vertex_main(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
+    return scene.view_projection * vec4<f32>(position, 1.0);
+}
+
+@fragment
+fn fragment_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(1.0, 0.68, 0.08, 0.58);
 }
 "#;
 
@@ -801,10 +962,60 @@ mod tests {
 
     #[test]
     fn visibility_and_hit_control_generated_geometry() {
-        let base = model_vertices(ModelKind::Classic, LayerVisibility::BASE_ONLY, None);
-        let all = model_vertices(ModelKind::Classic, LayerVisibility::ALL, None);
+        let base = model_vertices(ModelKind::Classic, LayerVisibility::BASE_ONLY);
+        let all = model_vertices(ModelKind::Classic, LayerVisibility::ALL);
         assert_eq!(base.len(), 6 * 6 * 6);
         assert_eq!(all.len(), 12 * 6 * 6);
-        assert!(base.iter().all(|vertex| vertex.highlight == 0.0));
+    }
+
+    #[test]
+    fn preview_geometry_contains_only_clipped_footprint_texels() {
+        let hit = ModelHit {
+            part: crate::BodyPart::Head,
+            layer: Layer::Outer,
+            face: Face::Front,
+            distance: 1.0,
+            texel: Texel::new(40, 8),
+        };
+        assert_eq!(
+            preview_vertices(ModelKind::Classic, hit, BrushSize::One).len(),
+            6
+        );
+        assert_eq!(
+            preview_vertices(ModelKind::Classic, hit, BrushSize::Four).len(),
+            9 * 6
+        );
+    }
+
+    #[test]
+    fn preview_geometry_respects_flipped_face_orientation() {
+        let region = face_region(
+            ModelKind::Classic,
+            crate::BodyPart::Head,
+            Layer::Base,
+            Face::Left,
+        );
+        assert!(region.flip_u);
+        let make_hit = |x| ModelHit {
+            part: crate::BodyPart::Head,
+            layer: Layer::Base,
+            face: Face::Left,
+            distance: 1.0,
+            texel: Texel::new(x, region.rect.y),
+        };
+        let first = preview_vertices(ModelKind::Classic, make_hit(region.rect.x), BrushSize::One);
+        let second = preview_vertices(
+            ModelKind::Classic,
+            make_hit(region.rect.x + 1),
+            BrushSize::One,
+        );
+        let average_z = |vertices: &[PreviewVertex]| {
+            vertices
+                .iter()
+                .map(|vertex| vertex.position[2])
+                .sum::<f32>()
+                / vertices.len() as f32
+        };
+        assert!(average_z(&first) > average_z(&second));
     }
 }

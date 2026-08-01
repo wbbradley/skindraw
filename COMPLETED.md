@@ -145,3 +145,32 @@ acceptance checks.
 - Complete the editor when it starts on both targets without panic, all controls work, painting
   selects the texel under the pointer from several camera angles, and a saved PNG is accepted as a
   Java Edition skin.
+
+## Preview the exact brush footprint
+
+Replaced the face-wide hover tint with transparent-safe GPU overlay geometry for the exact clipped
+1×1, 2×2, or 4×4 brush footprint. Painting and preview now share one CPU footprint calculation,
+including the established even-size anchor and face-edge clipping. Added tests for footprint
+anchoring, clipping, overlay geometry, and flipped UV orientation, and visually confirmed that the
+4×4 preview exactly matches the resulting paint on a transparent outer layer.
+
+### Original task
+
+## Preview the exact brush footprint
+
+Replace the current whole-face hover tint with a preview of the exact texels that the selected
+brush would paint.
+
+- Extract a shared brush-footprint calculation from `src/brush.rs` and use it for both painting and
+  preview generation so 1×1, 2×2, and 4×4 anchoring cannot drift apart. Preserve the current
+  even-sized brush anchoring and clip the footprint to the hit face's `AtlasRect`.
+- Pass the clipped footprint through `ModelPaintCallback` and render a clear translucent overlay or
+  outline for each covered texel in `src/renderer.rs`. Respect face UV flips and model kind, avoid
+  depth fighting and atlas bleeding, and keep the preview visible over transparent outer-layer
+  texels.
+- Remove the per-face `highlight` vertex and shader behavior. Show no preview without a valid hit,
+  and suppress it while an orbit drag is active.
+- Add table-driven tests for all brush sizes, face-edge clipping, and flipped faces, plus
+  renderer-adjacent tests proving only footprint texels receive preview geometry.
+- Manually verify that the preview matches the resulting stroke on opaque and transparent faces
+  from several camera angles, then run formatting, warnings-denied Clippy, and the full test suite.

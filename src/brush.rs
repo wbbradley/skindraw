@@ -23,6 +23,11 @@ impl BrushSize {
     }
 }
 
+pub fn brush_footprint(kind: ModelKind, hit: ModelHit, size: BrushSize) -> Vec<Texel> {
+    let rect = face_region(kind, hit.part, hit.layer, hit.face).rect;
+    clipped_footprint(rect, hit.texel, size)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PixelChange {
     pub texel: Texel,
@@ -109,38 +114,45 @@ impl StrokeBuilder {
         size: BrushSize,
         color: [u8; 4],
     ) {
-        let pixels = i16::from(size.pixels());
-        let offset = (pixels - 1) / 2;
-        for y_offset in 0..pixels {
-            for x_offset in 0..pixels {
-                let x = i16::from(center.x) - offset + x_offset;
-                let y = i16::from(center.y) - offset + y_offset;
-                if !(0..64).contains(&x) || !(0..64).contains(&y) {
-                    continue;
-                }
-                let texel = Texel::new(x as u8, y as u8);
-                if !rect.contains(texel) {
-                    continue;
-                }
-                let before = skin.pixel(texel);
-                if before == color {
-                    continue;
-                }
-                skin.set_pixel(texel, color);
-                if let Some(&index) = self.change_indices.get(&texel) {
-                    self.stroke.changes[index].after = color;
-                } else {
-                    let index = self.stroke.changes.len();
-                    self.stroke.changes.push(PixelChange {
-                        texel,
-                        before,
-                        after: color,
-                    });
-                    self.change_indices.insert(texel, index);
-                }
+        for texel in clipped_footprint(rect, center, size) {
+            let before = skin.pixel(texel);
+            if before == color {
+                continue;
+            }
+            skin.set_pixel(texel, color);
+            if let Some(&index) = self.change_indices.get(&texel) {
+                self.stroke.changes[index].after = color;
+            } else {
+                let index = self.stroke.changes.len();
+                self.stroke.changes.push(PixelChange {
+                    texel,
+                    before,
+                    after: color,
+                });
+                self.change_indices.insert(texel, index);
             }
         }
     }
+}
+
+fn clipped_footprint(rect: AtlasRect, center: Texel, size: BrushSize) -> Vec<Texel> {
+    let pixels = i16::from(size.pixels());
+    let offset = (pixels - 1) / 2;
+    let mut footprint = Vec::with_capacity(usize::from(size.pixels()).pow(2));
+    for y_offset in 0..pixels {
+        for x_offset in 0..pixels {
+            let x = i16::from(center.x) - offset + x_offset;
+            let y = i16::from(center.y) - offset + y_offset;
+            if !(0..64).contains(&x) || !(0..64).contains(&y) {
+                continue;
+            }
+            let texel = Texel::new(x as u8, y as u8);
+            if rect.contains(texel) {
+                footprint.push(texel);
+            }
+        }
+    }
+    footprint
 }
 
 struct TexelLine {
@@ -243,6 +255,35 @@ mod tests {
                     .all(|change| region.rect.contains(change.texel))
             );
         }
+    }
+
+    #[test]
+    fn preview_footprint_matches_even_size_anchoring_and_face_clipping() {
+        let front = hit(BodyPart::Head, Face::Front, Texel::new(10, 10));
+        assert_eq!(
+            brush_footprint(ModelKind::Classic, front, BrushSize::Two),
+            [
+                Texel::new(10, 10),
+                Texel::new(11, 10),
+                Texel::new(10, 11),
+                Texel::new(11, 11),
+            ]
+        );
+        let corner = hit(BodyPart::Head, Face::Front, Texel::new(8, 8));
+        assert_eq!(
+            brush_footprint(ModelKind::Classic, corner, BrushSize::Four),
+            [
+                Texel::new(8, 8),
+                Texel::new(9, 8),
+                Texel::new(10, 8),
+                Texel::new(8, 9),
+                Texel::new(9, 9),
+                Texel::new(10, 9),
+                Texel::new(8, 10),
+                Texel::new(9, 10),
+                Texel::new(10, 10),
+            ]
+        );
     }
 
     #[test]

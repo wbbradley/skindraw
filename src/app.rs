@@ -29,6 +29,10 @@ const PALETTE: [[u8; 4]; 16] = [
     [255, 174, 201, 255],
     [0, 0, 0, 0],
 ];
+const PALETTE_COLUMNS: usize = 5;
+const PALETTE_SWATCH_SIZE: f32 = 28.0;
+const PALETTE_SPACING: f32 = 4.0;
+const TOOLS_HORIZONTAL_MARGIN: i8 = 12;
 
 const NEW_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const OPEN_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -158,13 +162,21 @@ impl SkinDrawApp {
         }
     }
 
-    fn sidebar(&mut self, root: &mut egui::Ui) {
+    fn sidebar(&mut self, root: &mut egui::Ui) -> f32 {
+        let content_width = tools_content_width(root);
+        let panel_width = content_width + f32::from(TOOLS_HORIZONTAL_MARGIN) * 2.0;
+        let panel_frame = egui::Frame::side_top_panel(root.style())
+            .inner_margin(egui::Margin::symmetric(TOOLS_HORIZONTAL_MARGIN, 2));
+        let mut panel_left = root.max_rect().right();
         egui::Panel::right("tools")
-            .default_size(220.0)
-            .min_size(220.0)
-            .max_size(220.0)
+            .default_size(panel_width)
+            .min_size(panel_width)
+            .max_size(panel_width)
+            .frame(panel_frame)
             .resizable(false)
+            .show_separator_line(false)
             .show(root, |ui| {
+                panel_left = ui.clip_rect().left();
                 ui.heading("SkinDraw");
                 ui.add_space(8.0);
 
@@ -201,7 +213,7 @@ impl SkinDrawApp {
                             );
                             let selected = color == self.active_color;
                             let button = egui::Button::new("")
-                                .min_size(Vec2::splat(28.0))
+                                .min_size(Vec2::splat(PALETTE_SWATCH_SIZE))
                                 .fill(fill)
                                 .stroke(if selected {
                                     egui::Stroke::new(2.0, Color32::WHITE)
@@ -211,7 +223,7 @@ impl SkinDrawApp {
                             if ui.add(button).clicked() {
                                 self.active_color = color;
                             }
-                            if (index + 1) % 5 == 0 {
+                            if (index + 1) % PALETTE_COLUMNS == 0 {
                                 ui.end_row();
                             }
                         }
@@ -272,11 +284,13 @@ impl SkinDrawApp {
                     ));
                 }
             });
+        panel_left
     }
 
-    fn model_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let available = ui.available_size().max(Vec2::splat(1.0));
-        let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
+    fn model_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, tools_left: f32) {
+        let mut rect = ui.available_rect_before_wrap();
+        rect.max.x = rect.max.x.min(tools_left);
+        let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let space = ctx.input(|input| input.key_down(Key::Space));
         let primary_down = ctx.input(|input| {
             input.pointer.button_down(PointerButton::Primary)
@@ -289,9 +303,10 @@ impl SkinDrawApp {
             || response.clicked_by(PointerButton::Primary)
             || response.dragged_by(PointerButton::Primary);
 
-        if space && primary_down && pointer_in_view {
+        let orbiting = space && primary_down && pointer_in_view;
+        if orbiting {
             let delta = ctx.input(|input| input.pointer.delta());
-            self.camera.orbit(-delta.x * 0.012, -delta.y * 0.012);
+            self.camera.orbit(-delta.x * 0.012, delta.y * 0.012);
         }
 
         let pointer = response
@@ -326,7 +341,8 @@ impl SkinDrawApp {
                 camera: self.camera,
                 skin,
                 texture_update,
-                hit: self.hovered_hit,
+                preview_hit: if orbiting { None } else { self.hovered_hit },
+                brush_size: self.brush_size,
             }
             .paint_callback(),
         );
@@ -545,10 +561,10 @@ impl eframe::App for SkinDrawApp {
         self.handle_close_request(&ctx);
         self.shortcuts(&ctx);
         self.toolbar(ui, &ctx);
-        self.sidebar(ui);
+        let tools_left = self.sidebar(ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
-            .show(ui, |ui| self.model_view(ui, &ctx));
+            .show(ui, |ui| self.model_view(ui, &ctx, tools_left));
         self.dialogs(&ctx);
         let title = self
             .document
@@ -592,6 +608,39 @@ fn ensure_png_extension(mut path: PathBuf) -> PathBuf {
 
 fn display_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn tools_content_width(ui: &egui::Ui) -> f32 {
+    let body_font = egui::TextStyle::Body.resolve(ui.style());
+    let monospace_font = egui::TextStyle::Monospace.resolve(ui.style());
+    let body_text_width = [
+        "Enable a layer to paint.",
+        "Paint: primary-button drag",
+        "Orbit: Space + primary drag",
+    ]
+    .into_iter()
+    .map(|text| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), body_font.clone(), Color32::WHITE)
+            .size()
+            .x
+    })
+    .fold(0.0_f32, f32::max);
+    let hit_text_width = ui
+        .painter()
+        .layout_no_wrap(
+            "RightArm · Outer · Bottom".to_owned(),
+            monospace_font,
+            Color32::WHITE,
+        )
+        .size()
+        .x;
+    let palette_width = PALETTE_COLUMNS as f32 * PALETTE_SWATCH_SIZE
+        + (PALETTE_COLUMNS - 1) as f32 * PALETTE_SPACING;
+    body_text_width
+        .max(hit_text_width)
+        .max(palette_width)
+        .ceil()
 }
 
 #[cfg(test)]
