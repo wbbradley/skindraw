@@ -67,6 +67,19 @@ impl StrokeBuilder {
         size: BrushSize,
         color: [u8; 4],
     ) {
+        self.paint_with(skin, kind, hit, size, |_| color);
+    }
+
+    pub fn paint_with<F>(
+        &mut self,
+        skin: &mut Skin,
+        kind: ModelKind,
+        hit: ModelHit,
+        size: BrushSize,
+        mut color_for: F,
+    ) where
+        F: FnMut(Texel) -> [u8; 4],
+    {
         let key = FaceKey {
             part: hit.part,
             layer: hit.layer,
@@ -76,17 +89,17 @@ impl StrokeBuilder {
         if let Some((previous_key, previous_texel)) = self.previous {
             if previous_key == key {
                 if previous_texel == hit.texel {
-                    self.stamp(skin, rect, hit.texel, size, color);
+                    self.stamp(skin, rect, hit.texel, size, &mut color_for);
                 } else {
                     for texel in line(previous_texel, hit.texel).skip(1) {
-                        self.stamp(skin, rect, texel, size, color);
+                        self.stamp(skin, rect, texel, size, &mut color_for);
                     }
                 }
             } else {
-                self.stamp(skin, rect, hit.texel, size, color);
+                self.stamp(skin, rect, hit.texel, size, &mut color_for);
             }
         } else {
-            self.stamp(skin, rect, hit.texel, size, color);
+            self.stamp(skin, rect, hit.texel, size, &mut color_for);
         }
         self.previous = Some((key, hit.texel));
     }
@@ -100,12 +113,25 @@ impl StrokeBuilder {
     }
 
     pub fn flood_fill(&mut self, skin: &mut Skin, kind: ModelKind, hit: ModelHit, color: [u8; 4]) {
-        self.previous = None;
-        let rect = face_region(kind, hit.part, hit.layer, hit.face).rect;
         let target = skin.pixel(hit.texel);
         if target == color {
             return;
         }
+        self.flood_fill_with(skin, kind, hit, |_| color);
+    }
+
+    pub fn flood_fill_with<F>(
+        &mut self,
+        skin: &mut Skin,
+        kind: ModelKind,
+        hit: ModelHit,
+        mut color_for: F,
+    ) where
+        F: FnMut(Texel) -> [u8; 4],
+    {
+        self.previous = None;
+        let rect = face_region(kind, hit.part, hit.layer, hit.face).rect;
+        let target = skin.pixel(hit.texel);
         let mut visited = [false; 64 * 64];
         let mut pending = VecDeque::from([hit.texel]);
         while let Some(texel) = pending.pop_front() {
@@ -117,6 +143,7 @@ impl StrokeBuilder {
             if !rect.contains(texel) || skin.pixel(texel) != target {
                 continue;
             }
+            let color = color_for(texel);
             self.replace_pixel(skin, texel, color);
             for (x, y) in [
                 (i16::from(texel.x) - 1, i16::from(texel.y)),
@@ -138,15 +165,18 @@ impl StrokeBuilder {
         self.stroke
     }
 
-    fn stamp(
+    fn stamp<F>(
         &mut self,
         skin: &mut Skin,
         rect: AtlasRect,
         center: Texel,
         size: BrushSize,
-        color: [u8; 4],
-    ) {
+        color_for: &mut F,
+    ) where
+        F: FnMut(Texel) -> [u8; 4],
+    {
         for texel in clipped_footprint(rect, center, size) {
+            let color = color_for(texel);
             self.replace_pixel(skin, texel, color);
         }
     }
@@ -472,6 +502,54 @@ mod tests {
             usize::from(region.rect.width) * usize::from(region.rect.height)
         );
         assert_eq!(skin.pixel(Texel::new(19, 36)), [0; 4]);
+    }
+
+    #[test]
+    fn generated_colors_are_sampled_once_for_each_brush_texel() {
+        let mut skin = Skin::transparent();
+        let mut stroke = StrokeBuilder::new();
+        let mut sample = 0_u8;
+        stroke.paint_with(
+            &mut skin,
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(10, 10)),
+            BrushSize::Two,
+            |_| {
+                sample += 1;
+                [sample, 0, 0, 255]
+            },
+        );
+        assert_eq!(sample, 4);
+        let colors: std::collections::HashSet<_> = brush_footprint(
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(10, 10)),
+            BrushSize::Two,
+        )
+        .into_iter()
+        .map(|texel| skin.pixel(texel))
+        .collect();
+        assert_eq!(colors.len(), 4);
+    }
+
+    #[test]
+    fn generated_colors_are_sampled_independently_across_a_flood_fill() {
+        let mut skin = Skin::transparent();
+        let mut stroke = StrokeBuilder::new();
+        let target = hit(BodyPart::Head, Face::Front, Texel::new(8, 8));
+        let mut sample = 0_u8;
+        stroke.flood_fill_with(&mut skin, ModelKind::Classic, target, |_| {
+            sample = sample.wrapping_add(1);
+            [sample, 20, 30, 255]
+        });
+        assert_eq!(sample, 64);
+        let region = face_region(ModelKind::Classic, BodyPart::Head, Layer::Base, Face::Front);
+        let mut colors = std::collections::HashSet::new();
+        for y in region.rect.y..region.rect.y + region.rect.height {
+            for x in region.rect.x..region.rect.x + region.rect.width {
+                colors.insert(skin.pixel(Texel::new(x, y)));
+            }
+        }
+        assert_eq!(colors.len(), 64);
     }
 
     #[test]

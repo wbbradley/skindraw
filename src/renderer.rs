@@ -11,8 +11,8 @@ use eframe::{
 use glam::{Mat4, Vec3};
 
 use crate::{
-    BodyPart, BrushSize, Camera, Face, Layer, LayerVisibility, ModelHit, ModelKind, Skin,
-    brush_footprint, face_region, model_boxes,
+    BodyPart, BrushSize, Camera, Face, Layer, LayerVisibility, ModelArrangement, ModelHit,
+    ModelKind, Skin, arranged_model_boxes, brush_footprint, face_region, model_boxes,
     skin::{SKIN_HEIGHT, SKIN_WIDTH},
 };
 
@@ -77,6 +77,7 @@ pub struct ModelPaintCallback {
     pub preview_hit: Option<ModelHit>,
     pub brush_size: BrushSize,
     pub solo_part: Option<BodyPart>,
+    pub arrangement: ModelArrangement,
 }
 
 impl ModelPaintCallback {
@@ -549,12 +550,22 @@ impl ModelRenderer {
             .max(1.0) as u32;
         self.ensure_targets(device, [width, height]);
 
-        let vertices = model_vertices(callback.kind, callback.visibility, callback.solo_part);
+        let vertices = model_vertices(
+            callback.kind,
+            callback.visibility,
+            callback.solo_part,
+            callback.arrangement,
+        );
         debug_assert!(vertices.len() <= self.vertex_capacity);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         self.vertex_count = vertices.len() as u32;
         let preview_vertices = callback.preview_hit.map_or_else(Vec::new, |hit| {
-            preview_vertices(callback.kind, hit, callback.brush_size)
+            preview_vertices(
+                callback.kind,
+                hit,
+                callback.brush_size,
+                callback.arrangement,
+            )
         });
         queue.write_buffer(
             &self.preview_buffer,
@@ -763,6 +774,7 @@ fn model_vertices(
     kind: ModelKind,
     visibility: LayerVisibility,
     part: Option<BodyPart>,
+    arrangement: ModelArrangement,
 ) -> Vec<Vertex> {
     let mut vertices = Vec::with_capacity(12 * 6 * 6);
     for layer in [Layer::Base, Layer::Outer] {
@@ -773,7 +785,7 @@ fn model_vertices(
         if !visible {
             continue;
         }
-        for model_box in model_boxes(kind)
+        for model_box in arranged_model_boxes(kind, arrangement)
             .into_iter()
             .filter(|item| item.layer == layer && part.is_none_or(|part| item.part == part))
         {
@@ -852,8 +864,13 @@ fn vertex(position: Vec3, uv: [f32; 2]) -> Vertex {
     }
 }
 
-fn preview_vertices(kind: ModelKind, hit: ModelHit, size: BrushSize) -> Vec<PreviewVertex> {
-    let Some(model_box) = model_boxes(kind)
+fn preview_vertices(
+    kind: ModelKind,
+    hit: ModelHit,
+    size: BrushSize,
+    arrangement: ModelArrangement,
+) -> Vec<PreviewVertex> {
+    let Some(model_box) = arranged_model_boxes(kind, arrangement)
         .into_iter()
         .find(|item| item.part == hit.part && item.layer == hit.layer)
     else {
@@ -1140,16 +1157,36 @@ mod tests {
 
     #[test]
     fn visibility_and_hit_control_generated_geometry() {
-        let base = model_vertices(ModelKind::Classic, LayerVisibility::BASE_ONLY, None);
-        let all = model_vertices(ModelKind::Classic, LayerVisibility::ALL, None);
+        let base = model_vertices(
+            ModelKind::Classic,
+            LayerVisibility::BASE_ONLY,
+            None,
+            ModelArrangement::Joined,
+        );
+        let all = model_vertices(
+            ModelKind::Classic,
+            LayerVisibility::ALL,
+            None,
+            ModelArrangement::Joined,
+        );
         assert_eq!(base.len(), 6 * 6 * 6);
         assert_eq!(all.len(), 12 * 6 * 6);
         let solo = model_vertices(
             ModelKind::Classic,
             LayerVisibility::ALL,
             Some(BodyPart::RightArm),
+            ModelArrangement::Joined,
         );
         assert_eq!(solo.len(), 2 * 6 * 6);
+
+        let exploded = model_vertices(
+            ModelKind::Classic,
+            LayerVisibility::ALL,
+            None,
+            ModelArrangement::Exploded,
+        );
+        assert_eq!(exploded.len(), all.len());
+        assert_ne!(exploded[0].position, all[0].position);
     }
 
     #[test]
@@ -1207,11 +1244,23 @@ mod tests {
             texel: Texel::new(40, 8),
         };
         assert_eq!(
-            preview_vertices(ModelKind::Classic, hit, BrushSize::One).len(),
+            preview_vertices(
+                ModelKind::Classic,
+                hit,
+                BrushSize::One,
+                ModelArrangement::Joined,
+            )
+            .len(),
             6
         );
         assert_eq!(
-            preview_vertices(ModelKind::Classic, hit, BrushSize::Four).len(),
+            preview_vertices(
+                ModelKind::Classic,
+                hit,
+                BrushSize::Four,
+                ModelArrangement::Joined,
+            )
+            .len(),
             9 * 6
         );
     }
@@ -1232,11 +1281,17 @@ mod tests {
             distance: 1.0,
             texel: Texel::new(x, region.rect.y),
         };
-        let first = preview_vertices(ModelKind::Classic, make_hit(region.rect.x), BrushSize::One);
+        let first = preview_vertices(
+            ModelKind::Classic,
+            make_hit(region.rect.x),
+            BrushSize::One,
+            ModelArrangement::Joined,
+        );
         let second = preview_vertices(
             ModelKind::Classic,
             make_hit(region.rect.x + 1),
             BrushSize::One,
+            ModelArrangement::Joined,
         );
         let average_z = |vertices: &[PreviewVertex]| {
             vertices
@@ -1246,5 +1301,42 @@ mod tests {
                 / vertices.len() as f32
         };
         assert!(average_z(&first) > average_z(&second));
+    }
+
+    #[test]
+    fn exploded_preview_tracks_the_translated_body_part() {
+        let hit = ModelHit {
+            part: BodyPart::RightArm,
+            layer: Layer::Base,
+            face: Face::Left,
+            distance: 1.0,
+            texel: face_region(
+                ModelKind::Classic,
+                BodyPart::RightArm,
+                Layer::Base,
+                Face::Left,
+            )
+            .texel(0, 0)
+            .unwrap(),
+        };
+        let joined = preview_vertices(
+            ModelKind::Classic,
+            hit,
+            BrushSize::One,
+            ModelArrangement::Joined,
+        );
+        let exploded = preview_vertices(
+            ModelKind::Classic,
+            hit,
+            BrushSize::One,
+            ModelArrangement::Exploded,
+        );
+        let offset = ModelArrangement::Exploded.offset(hit.part);
+        for (joined, exploded) in joined.iter().zip(&exploded) {
+            assert_eq!(
+                Vec3::from(exploded.position) - Vec3::from(joined.position),
+                offset
+            );
+        }
     }
 }

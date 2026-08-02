@@ -17,8 +17,8 @@ use glam::Vec2 as ModelVec2;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BodyPart, BrushSize, Camera, LayerVisibility, ModelHit, ModelKind, Skin, SkinDocument,
-    StrokeBuilder, pick_model_part,
+    BodyPart, BrushSize, Camera, HsvJitter, LayerVisibility, ModelArrangement, ModelHit, ModelKind,
+    Skin, SkinDocument, StrokeBuilder, pick_model_part_arranged,
     renderer::{ModelPaintCallback, ModelRenderer, TextureUpdate},
 };
 
@@ -113,10 +113,12 @@ enum PaintTool {
     Fill,
 }
 
-#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 struct PersistedAppState {
     version: u32,
     palette: [[u8; 4]; 16],
+    #[serde(default)]
+    jitter: HsvJitter,
 }
 
 pub struct SkinDrawApp {
@@ -135,6 +137,8 @@ pub struct SkinDrawApp {
     primary_drag: PrimaryDrag,
     hovered_hit: Option<ModelHit>,
     solo_part: Option<BodyPart>,
+    arrangement: ModelArrangement,
+    jitter: HsvJitter,
     uploaded_skin: Skin,
     pending_action: Option<DocumentAction>,
     pending_file_dialog: Option<PendingFileDialog>,
@@ -152,8 +156,11 @@ impl SkinDrawApp {
             .expect("SkinDraw requires the WGPU renderer");
         ModelRenderer::install(render_state, document.skin());
         let mut app = Self::from_document(document, ModelKind::Classic);
-        if let Some(path) = app_state_path() {
-            app.palette = load_palette(&path).unwrap_or(DEFAULT_PALETTE);
+        if let Some(path) = app_state_path()
+            && let Some(state) = load_app_state(&path)
+        {
+            app.palette = state.palette;
+            app.jitter = state.jitter;
         }
         app
     }
@@ -180,6 +187,8 @@ impl SkinDrawApp {
             primary_drag: PrimaryDrag::Idle,
             hovered_hit: None,
             solo_part: None,
+            arrangement: ModelArrangement::Joined,
+            jitter: HsvJitter::default(),
             pending_action: None,
             pending_file_dialog: None,
             error_message: None,
@@ -276,6 +285,25 @@ impl SkinDrawApp {
                         }
                         ui.add_space(10.0);
 
+                        ui.label("Part layout");
+                        let mut requested_arrangement = self.arrangement;
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut requested_arrangement,
+                                ModelArrangement::Joined,
+                                "Joined",
+                            );
+                            ui.selectable_value(
+                                &mut requested_arrangement,
+                                ModelArrangement::Exploded,
+                                "Exploded",
+                            );
+                        });
+                        if requested_arrangement != self.arrangement {
+                            self.set_arrangement(requested_arrangement);
+                        }
+                        ui.add_space(10.0);
+
                         ui.label("Tool");
                         let mut requested_tool = self.tool;
                         ui.horizontal(|ui| {
@@ -350,6 +378,9 @@ impl SkinDrawApp {
                             );
                         });
 
+                        ui.add_space(10.0);
+                        self.jitter_controls(ui);
+
                         ui.add_space(12.0);
                         ui.horizontal(|ui| {
                             if ui
@@ -384,6 +415,8 @@ impl SkinDrawApp {
                         ui.label("Orbit: drag empty space or Shift + primary drag");
                         if let Some(part) = self.solo_part {
                             ui.label(format!("Solo: {part:?} (Escape to exit)"));
+                        } else if self.arrangement == ModelArrangement::Exploded {
+                            ui.label("Exploded layout (Escape to exit)");
                         } else {
                             ui.label("Solo: Ctrl + primary click");
                         }
@@ -450,18 +483,26 @@ impl SkinDrawApp {
                     match self.tool {
                         PaintTool::Brush => {
                             let stroke = self.active_stroke.get_or_insert_with(StrokeBuilder::new);
-                            self.document.paint(
+                            let jitter = self.jitter;
+                            let active_color = self.active_color;
+                            let mut rng = rand::rng();
+                            self.document.paint_with(
                                 stroke,
                                 self.kind,
                                 hit,
                                 self.brush_size,
-                                self.active_color,
+                                |_| jitter.sample(active_color, &mut rng),
                             );
                             self.status_message = None;
                         }
                         PaintTool::Fill if primary_pressed => {
                             self.finish_stroke();
-                            self.document.flood_fill(self.kind, hit, self.active_color);
+                            let jitter = self.jitter;
+                            let active_color = self.active_color;
+                            let mut rng = rand::rng();
+                            self.document.flood_fill_with(self.kind, hit, |_| {
+                                jitter.sample(active_color, &mut rng)
+                            });
                             self.status_message = None;
                         }
                         PaintTool::Fill => {}
@@ -492,12 +533,13 @@ impl SkinDrawApp {
         if texture_update.is_some() {
             self.uploaded_skin = (*skin).clone();
         }
+        let camera = camera_for_arrangement(self.camera, self.arrangement);
         ui.painter().add(
             ModelPaintCallback {
                 rect,
                 kind: self.kind,
                 visibility: self.visibility,
-                camera: self.camera,
+                camera,
                 skin,
                 texture_update,
                 preview_hit: if gesture == ViewGesture::Orbit {
@@ -511,9 +553,11 @@ impl SkinDrawApp {
                     BrushSize::One
                 },
                 solo_part: self.solo_part,
+                arrangement: self.arrangement,
             }
             .paint_callback(),
         );
+        paint_orientation_badge(ui, rect, self.camera.viewing_side().label());
 
         if gesture == ViewGesture::Orbit {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -525,12 +569,19 @@ impl SkinDrawApp {
     }
 
     fn hit_at(&self, rect: Rect, pointer: egui::Pos2) -> Option<ModelHit> {
-        let ray = self.camera.ray_for_pointer(
+        let camera = camera_for_arrangement(self.camera, self.arrangement);
+        let ray = camera.ray_for_pointer(
             ModelVec2::new(pointer.x, pointer.y),
             ModelVec2::new(rect.min.x, rect.min.y),
             ModelVec2::new(rect.width(), rect.height()),
         )?;
-        pick_model_part(ray, self.kind, self.visibility, self.solo_part)
+        pick_model_part_arranged(
+            ray,
+            self.kind,
+            self.visibility,
+            self.solo_part,
+            self.arrangement,
+        )
     }
 
     fn finish_stroke(&mut self) {
@@ -558,14 +609,25 @@ impl SkinDrawApp {
 
     fn store_palette_color(&mut self, index: usize) {
         self.assign_palette_color(index);
+        self.persist_app_state();
+    }
+
+    fn persist_app_state(&mut self) {
         let Some(path) = app_state_path() else {
             self.error_message =
-                Some("Could not find the home directory for palette state.".into());
+                Some("Could not find the home directory for application state.".into());
             return;
         };
-        if let Err(error) = save_palette(&path, self.palette) {
+        if let Err(error) = save_app_state(
+            &path,
+            PersistedAppState {
+                version: APP_STATE_VERSION,
+                palette: self.palette,
+                jitter: self.jitter,
+            },
+        ) {
             self.error_message = Some(format!(
-                "Could not save palette to {}:\n{error}",
+                "Could not save application state to {}:\n{error}",
                 display_path(&path)
             ));
         }
@@ -630,16 +692,57 @@ impl SkinDrawApp {
         }
     }
 
+    fn jitter_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label("Random jitter (standard deviation)");
+        let mut changed = false;
+        egui::Grid::new("hsv_jitter").num_columns(2).show(ui, |ui| {
+            for (label, value, suffix, maximum) in [
+                ("Hue", &mut self.jitter.hue_degrees, "°", 180.0),
+                (
+                    "Saturation",
+                    &mut self.jitter.saturation_percent,
+                    "%",
+                    100.0,
+                ),
+                ("Value", &mut self.jitter.value_percent, "%", 100.0),
+            ] {
+                ui.label(label);
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(value)
+                            .range(0.0..=maximum)
+                            .speed(0.25)
+                            .suffix(suffix),
+                    )
+                    .changed();
+                ui.end_row();
+            }
+        });
+        if changed {
+            self.persist_app_state();
+        }
+    }
+
     fn enter_solo(&mut self, part: BodyPart) {
         self.finish_stroke();
+        self.arrangement = ModelArrangement::Joined;
         self.solo_part = Some(part);
     }
 
+    fn set_arrangement(&mut self, arrangement: ModelArrangement) {
+        self.finish_stroke();
+        self.arrangement = arrangement;
+        if arrangement == ModelArrangement::Exploded {
+            self.solo_part = None;
+        }
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.solo_part.is_some()
+        if (self.solo_part.is_some() || self.arrangement == ModelArrangement::Exploded)
             && ctx.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Escape))
         {
             self.solo_part = None;
+            self.arrangement = ModelArrangement::Joined;
         }
         let text_input_focused = ctx.text_edit_focused();
         let tool = ctx.input(|input| {
@@ -706,6 +809,7 @@ impl SkinDrawApp {
         self.kind = kind;
         self.hovered_hit = None;
         self.solo_part = None;
+        self.arrangement = ModelArrangement::Joined;
         self.status_message = None;
     }
 
@@ -1001,6 +1105,26 @@ fn parse_hex_color(text: &str) -> Option<[u8; 4]> {
     Some(u32::from_str_radix(digits, 16).ok()?.to_be_bytes())
 }
 
+fn camera_for_arrangement(mut camera: Camera, arrangement: ModelArrangement) -> Camera {
+    if arrangement == ModelArrangement::Exploded {
+        camera.orthographic_height = camera.orthographic_height.max(54.0);
+    }
+    camera
+}
+
+fn paint_orientation_badge(ui: &egui::Ui, viewport: Rect, label: &str) {
+    let rect = Rect::from_min_size(viewport.min + egui::vec2(12.0, 12.0), Vec2::new(72.0, 28.0));
+    ui.painter()
+        .rect_filled(rect, 5.0, Color32::from_black_alpha(180));
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::proportional(16.0),
+        Color32::WHITE,
+    );
+}
+
 fn color_swatch(
     ui: &mut egui::Ui,
     size: Vec2,
@@ -1048,20 +1172,16 @@ fn app_state_path() -> Option<PathBuf> {
         .map(|home| home.join(".local/state/skindraw.json"))
 }
 
-fn load_palette(path: &Path) -> Option<[[u8; 4]; 16]> {
+fn load_app_state(path: &Path) -> Option<PersistedAppState> {
     let bytes = fs::read(path).ok()?;
     let state: PersistedAppState = serde_json::from_slice(&bytes).ok()?;
-    (state.version == APP_STATE_VERSION).then_some(state.palette)
+    (state.version == APP_STATE_VERSION).then_some(state)
 }
 
-fn save_palette(path: &Path, palette: [[u8; 4]; 16]) -> io::Result<()> {
+fn save_app_state(path: &Path, state: PersistedAppState) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let state = PersistedAppState {
-        version: APP_STATE_VERSION,
-        palette,
-    };
     let bytes = serde_json::to_vec_pretty(&state).map_err(io::Error::other)?;
     let temporary = path.with_extension("json.tmp");
     fs::write(&temporary, bytes)?;
@@ -1117,6 +1237,8 @@ fn tools_content_width(ui: &egui::Ui) -> f32 {
         "Sample: secondary-button click",
         "Orbit: drag empty space or Shift + primary drag",
         "Solo: RightArm (Escape to exit)",
+        "Exploded layout (Escape to exit)",
+        "Random jitter (standard deviation)",
     ]
     .into_iter()
     .map(|text| {
@@ -1217,34 +1339,48 @@ mod tests {
     }
 
     #[test]
-    fn palette_state_round_trips_and_invalid_state_falls_back() {
+    fn app_state_round_trips_palette_and_jitter_and_rejects_invalid_state() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("state/skindraw.json");
         let mut palette = DEFAULT_PALETTE;
         palette[0] = [1, 2, 3, 4];
         palette[15] = [250, 240, 230, 0];
-        save_palette(&path, palette).unwrap();
-        assert_eq!(load_palette(&path), Some(palette));
+        let state = PersistedAppState {
+            version: APP_STATE_VERSION,
+            palette,
+            jitter: HsvJitter {
+                hue_degrees: 12.0,
+                saturation_percent: 8.0,
+                value_percent: 4.0,
+            },
+        };
+        save_app_state(&path, state).unwrap();
+        assert_eq!(load_app_state(&path), Some(state));
         assert!(!path.with_extension("json.tmp").exists());
 
         fs::write(&path, b"not json").unwrap();
-        assert_eq!(
-            load_palette(&path).unwrap_or(DEFAULT_PALETTE),
-            DEFAULT_PALETTE
-        );
+        assert_eq!(load_app_state(&path), None);
         fs::write(
             &path,
             serde_json::to_vec(&PersistedAppState {
                 version: APP_STATE_VERSION + 1,
                 palette,
+                jitter: HsvJitter::default(),
             })
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            load_palette(&path).unwrap_or(DEFAULT_PALETTE),
-            DEFAULT_PALETTE
-        );
+        assert_eq!(load_app_state(&path), None);
+
+        fs::write(
+            &path,
+            format!(
+                "{{\"version\":{APP_STATE_VERSION},\"palette\":{}}}",
+                serde_json::to_string(&palette).unwrap()
+            ),
+        )
+        .unwrap();
+        assert_eq!(load_app_state(&path).unwrap().jitter, HsvJitter::default());
     }
 
     #[test]
@@ -1444,13 +1580,18 @@ mod tests {
         let document = SkinDocument::new(ModelKind::Classic);
         let mut app = SkinDrawApp::from_document(document, ModelKind::Classic);
         let skin = app.document.skin().clone();
+        app.set_arrangement(ModelArrangement::Exploded);
+        assert_eq!(app.arrangement, ModelArrangement::Exploded);
+        assert_eq!(app.solo_part, None);
         app.enter_solo(BodyPart::RightArm);
         assert_eq!(app.solo_part, Some(BodyPart::RightArm));
+        assert_eq!(app.arrangement, ModelArrangement::Joined);
         assert_eq!(app.document.skin(), &skin);
         assert!(!app.document.is_dirty());
         assert_eq!(app.document.undo_len(), 0);
         assert_eq!(app.document.redo_len(), 0);
         app.solo_part = None;
+        app.set_arrangement(ModelArrangement::Exploded);
         assert_eq!(app.document.skin(), &skin);
         assert!(!app.document.is_dirty());
     }
@@ -1459,6 +1600,7 @@ mod tests {
     fn dirty_replacement_is_guarded_and_discard_replaces_atomically() {
         let mut app = dirty_app();
         app.solo_part = Some(BodyPart::Head);
+        app.arrangement = ModelArrangement::Exploded;
         app.palette[0] = [11, 22, 33, 44];
         let changed = app.document.skin().clone();
         let ctx = egui::Context::default();
@@ -1474,6 +1616,7 @@ mod tests {
         app.execute_action(DocumentAction::New(ModelKind::Slim), &ctx);
         assert_eq!(app.kind, ModelKind::Slim);
         assert_eq!(app.solo_part, None);
+        assert_eq!(app.arrangement, ModelArrangement::Joined);
         assert_eq!(app.palette[0], [11, 22, 33, 44]);
         assert!(!app.document.is_dirty());
         assert_ne!(app.document.skin(), &changed);

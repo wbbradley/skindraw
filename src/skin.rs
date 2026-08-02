@@ -221,9 +221,31 @@ impl SkinDocument {
         builder.paint(&mut self.skin, kind, hit, size, color);
     }
 
+    pub fn paint_with<F>(
+        &mut self,
+        builder: &mut StrokeBuilder,
+        kind: ModelKind,
+        hit: ModelHit,
+        size: BrushSize,
+        color_for: F,
+    ) where
+        F: FnMut(Texel) -> [u8; 4],
+    {
+        builder.paint_with(&mut self.skin, kind, hit, size, color_for);
+    }
+
     pub fn flood_fill(&mut self, kind: ModelKind, hit: ModelHit, color: [u8; 4]) -> bool {
         let mut builder = StrokeBuilder::new();
         builder.flood_fill(&mut self.skin, kind, hit, color);
+        self.commit_stroke(builder)
+    }
+
+    pub fn flood_fill_with<F>(&mut self, kind: ModelKind, hit: ModelHit, color_for: F) -> bool
+    where
+        F: FnMut(Texel) -> [u8; 4],
+    {
+        let mut builder = StrokeBuilder::new();
+        builder.flood_fill_with(&mut self.skin, kind, hit, color_for);
         self.commit_stroke(builder)
     }
 

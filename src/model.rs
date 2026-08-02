@@ -6,6 +6,29 @@ pub enum ModelKind {
     Slim,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ModelArrangement {
+    #[default]
+    Joined,
+    Exploded,
+}
+
+impl ModelArrangement {
+    pub fn offset(self, part: BodyPart) -> Vec3 {
+        if self == Self::Joined {
+            return Vec3::ZERO;
+        }
+        match part {
+            BodyPart::Head => Vec3::new(0.0, 8.0, 0.0),
+            BodyPart::Torso => Vec3::ZERO,
+            BodyPart::RightArm => Vec3::new(-8.0, 0.0, 0.0),
+            BodyPart::LeftArm => Vec3::new(8.0, 0.0, 0.0),
+            BodyPart::RightLeg => Vec3::new(-4.0, -8.0, 0.0),
+            BodyPart::LeftLeg => Vec3::new(4.0, -8.0, 0.0),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BodyPart {
     Head,
@@ -103,6 +126,14 @@ impl ModelBox {
     pub fn size(self) -> Vec3 {
         self.max - self.min
     }
+
+    pub fn translated(self, offset: Vec3) -> Self {
+        Self {
+            min: self.min + offset,
+            max: self.max + offset,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -171,6 +202,13 @@ pub fn model_boxes(kind: ModelKind) -> Vec<ModelBox> {
     boxes
 }
 
+pub fn arranged_model_boxes(kind: ModelKind, arrangement: ModelArrangement) -> Vec<ModelBox> {
+    model_boxes(kind)
+        .into_iter()
+        .map(|model_box| model_box.translated(arrangement.offset(model_box.part)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +237,30 @@ mod tests {
             .unwrap();
         assert_eq!(hat.min, Vec3::new(-4.5, 23.5, -4.5));
         assert_eq!(hat.max, Vec3::new(4.5, 32.5, 4.5));
+    }
+
+    #[test]
+    fn exploded_boxes_translate_both_layers_without_resizing_them() {
+        let joined = model_boxes(ModelKind::Classic);
+        let exploded = arranged_model_boxes(ModelKind::Classic, ModelArrangement::Exploded);
+        assert_eq!(joined.len(), exploded.len());
+        for (joined, exploded) in joined.iter().zip(&exploded) {
+            assert_eq!(joined.part, exploded.part);
+            assert_eq!(joined.layer, exploded.layer);
+            assert_eq!(joined.size(), exploded.size());
+            assert_eq!(
+                exploded.min - joined.min,
+                ModelArrangement::Exploded.offset(joined.part)
+            );
+        }
+        let right_arm = exploded
+            .iter()
+            .find(|item| item.part == BodyPart::RightArm && item.layer == Layer::Base)
+            .unwrap();
+        let torso = exploded
+            .iter()
+            .find(|item| item.part == BodyPart::Torso && item.layer == Layer::Base)
+            .unwrap();
+        assert!(right_arm.max.x < torso.min.x);
     }
 }

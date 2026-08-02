@@ -1,10 +1,13 @@
-use std::f32::consts::FRAC_PI_2;
+use std::f32::consts::{FRAC_PI_2, PI};
 
 use glam::{Vec2, Vec3};
 
 use crate::{
     atlas::face_region,
-    model::{BodyPart, Face, Layer, ModelBox, ModelHit, ModelKind, Ray, model_boxes},
+    model::{
+        BodyPart, Face, Layer, ModelArrangement, ModelBox, ModelHit, ModelKind, Ray,
+        arranged_model_boxes,
+    },
 };
 
 const PITCH_MARGIN: f32 = 0.001;
@@ -46,6 +49,25 @@ pub struct Camera {
     pub orthographic_height: f32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ViewingSide {
+    Front,
+    Back,
+    Left,
+    Right,
+}
+
+impl ViewingSide {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Front => "Front",
+            Self::Back => "Back",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+}
+
 impl Default for Camera {
     fn default() -> Self {
         Self {
@@ -71,6 +93,19 @@ impl Camera {
 
     pub fn view_direction(self) -> Vec3 {
         -self.offset_direction()
+    }
+
+    pub fn viewing_side(self) -> ViewingSide {
+        let yaw = self.yaw.rem_euclid(2.0 * PI);
+        if (PI * 0.25..PI * 0.75).contains(&yaw) {
+            ViewingSide::Left
+        } else if (PI * 0.75..PI * 1.25).contains(&yaw) {
+            ViewingSide::Back
+        } else if (PI * 1.25..PI * 1.75).contains(&yaw) {
+            ViewingSide::Right
+        } else {
+            ViewingSide::Front
+        }
     }
 
     pub fn ray_for_pointer(
@@ -110,7 +145,16 @@ impl Camera {
 }
 
 pub fn pick_model(ray: Ray, kind: ModelKind, visibility: LayerVisibility) -> Option<ModelHit> {
-    pick_model_part(ray, kind, visibility, None)
+    pick_model_arranged(ray, kind, visibility, ModelArrangement::Joined)
+}
+
+pub fn pick_model_arranged(
+    ray: Ray,
+    kind: ModelKind,
+    visibility: LayerVisibility,
+    arrangement: ModelArrangement,
+) -> Option<ModelHit> {
+    pick_model_part_arranged(ray, kind, visibility, None, arrangement)
 }
 
 pub fn pick_model_part(
@@ -119,7 +163,17 @@ pub fn pick_model_part(
     visibility: LayerVisibility,
     part: Option<BodyPart>,
 ) -> Option<ModelHit> {
-    model_boxes(kind)
+    pick_model_part_arranged(ray, kind, visibility, part, ModelArrangement::Joined)
+}
+
+pub fn pick_model_part_arranged(
+    ray: Ray,
+    kind: ModelKind,
+    visibility: LayerVisibility,
+    part: Option<BodyPart>,
+    arrangement: ModelArrangement,
+) -> Option<ModelHit> {
+    arranged_model_boxes(kind, arrangement)
         .into_iter()
         .filter(|model_box| visibility.includes(model_box.layer))
         .filter(|model_box| part.is_none_or(|part| model_box.part == part))
@@ -243,6 +297,47 @@ mod tests {
         camera.orbit(-50.0, -40.0);
         assert_eq!(camera.yaw, -30.0);
         assert!(camera.pitch > -FRAC_PI_2);
+    }
+
+    #[test]
+    fn camera_reports_the_nearest_horizontal_character_side() {
+        let mut camera = Camera::default();
+        for (yaw, expected) in [
+            (0.0, ViewingSide::Front),
+            (FRAC_PI_2, ViewingSide::Left),
+            (PI, ViewingSide::Back),
+            (-FRAC_PI_2, ViewingSide::Right),
+            (2.0 * PI, ViewingSide::Front),
+        ] {
+            camera.yaw = yaw;
+            assert_eq!(camera.viewing_side(), expected);
+            assert_eq!(camera.viewing_side().label(), format!("{expected:?}"));
+        }
+    }
+
+    #[test]
+    fn exploded_picking_reaches_separated_interior_faces() {
+        let hit = pick_model_part_arranged(
+            ray(Vec3::new(-14.0, 18.0, 20.0), -Vec3::Z),
+            ModelKind::Classic,
+            LayerVisibility::BASE_ONLY,
+            None,
+            ModelArrangement::Exploded,
+        )
+        .unwrap();
+        assert_eq!(hit.part, BodyPart::RightArm);
+        assert_eq!(hit.face, Face::Front);
+
+        let interior = pick_model_part_arranged(
+            ray(Vec3::new(-8.0, 18.0, 0.0), -Vec3::X),
+            ModelKind::Classic,
+            LayerVisibility::BASE_ONLY,
+            None,
+            ModelArrangement::Exploded,
+        )
+        .unwrap();
+        assert_eq!(interior.part, BodyPart::RightArm);
+        assert_eq!(interior.face, Face::Left);
     }
 
     #[test]
