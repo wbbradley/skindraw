@@ -787,3 +787,12 @@ clamping saturation/value, converting back to RGB, and preserving alpha exactly.
   So, for each pixel being set (including in fill operations), we will take the current color, find
   random (normal dist) offsets for that color's HSV apply those offsets, then convert that back to
   RGB for the final pixel setting operation.
+
+## Release version 0.1.3
+
+Updated the README and changelog, verified the optimized release build, bumped Cargo to 0.1.3,
+created the annotated `v0.1.3` tag, and pushed both `main` and the tag to GitHub.
+
+### Original task
+
+* Finally, let's bump the version, and push to github with a new tag, etc..
