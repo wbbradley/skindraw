@@ -749,3 +749,41 @@ stack backtrace:
  139:        0x10254102c - _main
 thread caused non-unwinding panic. aborting.
 Abort trap: 6              cargo run
+
+## Always-visible viewing orientation
+
+Added a persistent viewport badge derived from camera yaw that reports the nearest Front, Back,
+Left, or Right side while orbiting.
+
+### Original task
+
+* Let's have some always visible text that tells you whether you are looking at the front, back,
+  left, or right of the player.
+
+## Exploded body-part layout
+
+Added a paintable Exploded layout that substantially separates every cuboid while keeping all
+layers visible and interactive. Rendering, ray picking, and brush previews share the same translated
+geometry; the camera widens to frame it, Solo and Exploded remain mutually exclusive, and Escape
+returns to Joined layout.
+
+### Original task
+
+* Let's have an alternative to solo mode that still shows all the cuboids, and allows you to paint
+  on them, however, instead of being flush together, they are all split apart by a considerable
+  distance so that the tools can reach into the interior faces more easily.
+
+## Per-texel Gaussian HSV jitter
+
+Added persisted hue, saturation, and value standard-deviation controls. Brush interpolation and
+flood fill independently sample additive normal offsets for every affected texel, wrapping hue,
+clamping saturation/value, converting back to RGB, and preserving alpha exactly.
+
+### Original task
+
+* Let's change the way the color selection interacts with the brush. Let's have a "random jitter"
+  factor that is tweakable in the side pane. This jitter will have three dimensions, one each for
+  hue, saturation, and value. They represent stddev against those parameters in an additive fashion.
+  So, for each pixel being set (including in fill operations), we will take the current color, find
+  random (normal dist) offsets for that color's HSV apply those offsets, then convert that back to
+  RGB for the final pixel setting operation.

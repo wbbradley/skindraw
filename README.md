@@ -2,7 +2,8 @@
 
 SkinDraw is a desktop editor for painting Minecraft-compatible player skins directly on a 3D
 model. It supports classic and slim models, base and outer layers, exact brush-footprint previews,
-body-part soloing, editable colors, and face-bounded flood fill.
+an always-visible viewing-direction indicator, joined and exploded body-part layouts, body-part
+soloing, editable colors, configurable HSV color jitter, and face-bounded flood fill.
 
 ## Install on Ubuntu
 
@@ -11,7 +12,7 @@ The Linux package supports amd64 Ubuntu 22.04 and newer. Download the `.deb` fro
 APT, substituting the downloaded package's version:
 
 ```bash
-VERSION=0.1.2
+VERSION=0.1.3
 sudo apt install "./skindraw_${VERSION}-1_amd64.deb"
 ```
 
@@ -22,8 +23,8 @@ installation. To remove it:
 sudo apt remove skindraw
 ```
 
-Application preferences remain specific to each desktop user and are stored in
-`~/.local/state/skindraw.json`.
+Application preferences, including the editable palette and HSV jitter settings, remain specific
+to each desktop user and are stored in `~/.local/state/skindraw.json`.
 
 ## Build from source
 
@@ -60,7 +61,7 @@ For a release, first update `version` in `Cargo.toml` and refresh `Cargo.lock`. 
 changes, then create and push the exactly matching tag:
 
 ```bash
-VERSION=0.1.2
+VERSION=0.1.3
 git tag "v$VERSION"
 git push origin "v$VERSION"
 ```
