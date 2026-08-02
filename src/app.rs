@@ -553,8 +553,8 @@ impl SkinDrawApp {
                     BrushSize::One
                 },
                 solo_part: self.solo_part,
-                arrangement: self.arrangement,
             }
+            .with_arrangement(self.arrangement)
             .paint_callback(),
         );
         paint_orientation_badge(ui, rect, self.camera.viewing_side().label());

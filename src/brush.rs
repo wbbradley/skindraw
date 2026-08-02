@@ -113,6 +113,7 @@ impl StrokeBuilder {
     }
 
     pub fn flood_fill(&mut self, skin: &mut Skin, kind: ModelKind, hit: ModelHit, color: [u8; 4]) {
+        self.previous = None;
         let target = skin.pixel(hit.texel);
         if target == color {
             return;
@@ -550,6 +551,34 @@ mod tests {
             }
         }
         assert_eq!(colors.len(), 64);
+    }
+
+    #[test]
+    fn same_color_flood_fill_still_resets_brush_continuity() {
+        let mut skin = Skin::transparent();
+        let mut stroke = StrokeBuilder::new();
+        stroke.paint(
+            &mut skin,
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(8, 8)),
+            BrushSize::One,
+            [255, 0, 0, 255],
+        );
+        stroke.flood_fill(
+            &mut skin,
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(9, 9)),
+            [0, 0, 0, 0],
+        );
+        stroke.paint(
+            &mut skin,
+            ModelKind::Classic,
+            hit(BodyPart::Head, Face::Front, Texel::new(12, 8)),
+            BrushSize::One,
+            [0, 0, 255, 255],
+        );
+        assert_eq!(stroke.changed_pixel_count(), 2);
+        assert_eq!(skin.pixel(Texel::new(10, 8)), [0, 0, 0, 0]);
     }
 
     #[test]

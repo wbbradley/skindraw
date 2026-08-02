@@ -77,12 +77,30 @@ pub struct ModelPaintCallback {
     pub preview_hit: Option<ModelHit>,
     pub brush_size: BrushSize,
     pub solo_part: Option<BodyPart>,
-    pub arrangement: ModelArrangement,
 }
 
 impl ModelPaintCallback {
     pub fn paint_callback(self) -> eframe::egui::PaintCallback {
         Callback::new_paint_callback(self.rect, self)
+    }
+
+    pub fn with_arrangement(self, arrangement: ModelArrangement) -> ArrangedModelPaintCallback {
+        ArrangedModelPaintCallback {
+            model: self,
+            arrangement,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ArrangedModelPaintCallback {
+    pub model: ModelPaintCallback,
+    pub arrangement: ModelArrangement,
+}
+
+impl ArrangedModelPaintCallback {
+    pub fn paint_callback(self) -> eframe::egui::PaintCallback {
+        Callback::new_paint_callback(self.model.rect, self)
     }
 }
 
@@ -98,7 +116,50 @@ impl CallbackTrait for ModelPaintCallback {
         let renderer: &mut ModelRenderer = resources
             .get_mut()
             .expect("model renderer was installed at app creation");
-        renderer.prepare(device, queue, encoder, screen, self);
+        renderer.prepare(
+            device,
+            queue,
+            encoder,
+            screen,
+            self,
+            ModelArrangement::Joined,
+        );
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &CallbackResources,
+    ) {
+        let renderer: &ModelRenderer = resources
+            .get()
+            .expect("model renderer was installed at app creation");
+        renderer.paint(pass);
+    }
+}
+
+impl CallbackTrait for ArrangedModelPaintCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let renderer: &mut ModelRenderer = resources
+            .get_mut()
+            .expect("model renderer was installed at app creation");
+        renderer.prepare(
+            device,
+            queue,
+            encoder,
+            screen,
+            &self.model,
+            self.arrangement,
+        );
         Vec::new()
     }
 
@@ -538,6 +599,7 @@ impl ModelRenderer {
         encoder: &mut wgpu::CommandEncoder,
         screen: &ScreenDescriptor,
         callback: &ModelPaintCallback,
+        arrangement: ModelArrangement,
     ) {
         if let Some(update) = callback.texture_update {
             self.upload_texture(queue, &callback.skin, update);
@@ -554,18 +616,13 @@ impl ModelRenderer {
             callback.kind,
             callback.visibility,
             callback.solo_part,
-            callback.arrangement,
+            arrangement,
         );
         debug_assert!(vertices.len() <= self.vertex_capacity);
         queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         self.vertex_count = vertices.len() as u32;
         let preview_vertices = callback.preview_hit.map_or_else(Vec::new, |hit| {
-            preview_vertices(
-                callback.kind,
-                hit,
-                callback.brush_size,
-                callback.arrangement,
-            )
+            preview_vertices(callback.kind, hit, callback.brush_size, arrangement)
         });
         queue.write_buffer(
             &self.preview_buffer,
